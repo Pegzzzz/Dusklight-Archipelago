@@ -39,9 +39,11 @@
 #include "d/actor/d_a_npc_ykw.h"
 #include "d/actor/d_a_npc_zrc.h"
 #include "d/actor/d_a_npc_zrz.h"
+#include "d/actor/d_a_obj_crvgate.h"
 #include "d/actor/d_a_obj_item.h"
 #include "d/actor/d_a_obj_life_container.h"
 #include "d/actor/d_a_obj_master_sword.h"
+#include "d/actor/d_a_obj_smallkey.h"
 #include "d/actor/d_a_obj_swBallC.h"
 #include "d/actor/d_a_obj_wind_stone.h"
 #include "d/actor/d_a_obj_zra_rock.h"
@@ -174,6 +176,8 @@ DEFINE_HOOK_SYMBOL("daDitem_Execute", int(daDitem_c*), daDitem_c__execute);
 
 DEFINE_HOOK(&daShopItem_c::CreateInit, daShopItem_c__CreateInit);
 
+DEFINE_HOOK(&daKey_c::create, daKey_c__create);
+
 DEFINE_HOOK_SYMBOL("lure_heart", void(dmg_rod_class*), mgRod_lure_heart);
 DEFINE_HOOK_SYMBOL("uki_catch", void(dmg_rod_class*), mgRod_uki_catch);
 
@@ -223,6 +227,10 @@ DEFINE_HOOK(&dEvt_control_c::skipper, dEvt_control_c__skipper);
 DEFINE_HOOK(&daObjMasterSword_c::executeWait, daObjMasterSword_c__executeWait);
 
 DEFINE_HOOK_SYMBOL("daWindStone_c::chkEveOccur", bool(daWindStone_c*), daWindStone_c__chkEveOccur);
+
+DEFINE_HOOK(&daObjCRVGATE_c::SetOpen, daObjCRVGATE_c__SetOpen);
+DEFINE_HOOK(&daObjCRVGATE_c::create, daObjCRVGATE_c__create);
+DEFINE_HOOK(&daObjCRVGATE_c::setBaseMtx, daObjCRVGATE_c__setBaseMtx);
 
 namespace randomizer::ui {
 GameModeNewSaveState *g_dialogSelectModeState = nullptr;
@@ -2548,6 +2556,18 @@ void hookPostShopItemCreateInit(ModContext*, void* args, void*, void*) {
     }
 }
 
+HookAction hookPreKeyCreate(ModContext*, void* args, void* retval, void*) {
+    // Don't ever spawn the small key object in bulblin camp
+    if (getStageID() == Bulblin_Camp) {
+        auto key = mods::arg<daKey_c*>(args, 0);
+        fopAcM_ct(key, daKey_c);
+        *static_cast<cPhs_Step*>(retval) = cPhs_ERROR_e;
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 bool hookUkiCatch_isSkipSetBottle = false;
 HookAction hookPreUkiCatch(ModContext*, void* args, void*, void*) {
     auto* i_this = mods::arg<dmg_rod_class*>(args, 0);
@@ -3433,6 +3453,39 @@ HookAction hookPreWindStoneChkEveOccur(ModContext*, void* args, void* retval, vo
     return HOOK_CONTINUE;
 }
 
+void hookPostObjCRVGATESetOpen(ModContext*, void* args, void* retval, void*) {
+    auto gate = mods::arg<daObjCRVGATE_c*>(args, 0);
+    u8 doorUnlockedFlag = (fopAcM_GetParam(gate) & 0xFFFF) >> 8;
+    if (doorUnlockedFlag != 0xFF) {
+        fopAcM_onSwitch(gate, doorUnlockedFlag);
+    }
+}
+
+bool g_CRVGATENoLock = false;
+void hookPostObjCRVGATECreate(ModContext*, void* args, void* retval, void*) {
+    auto gate = mods::arg<daObjCRVGATE_c*>(args, 0);
+    // Immediately set the door to open if the flag for already having opened it is set.
+    u8 doorUnlockedFlag = (fopAcM_GetParam(gate) & 0xFFFF) >> 8;
+    if (*static_cast<cPhs_Step*>(retval) == cPhs_COMPLEATE_e && gate->mKeyParam == 0 &&
+        doorUnlockedFlag != 0xFF && fopAcM_isSwitch(gate, doorUnlockedFlag))
+    {
+        gate->SetOpen();
+        gate->mpDoorPair->SetOpen();
+        g_CRVGATENoLock = true;
+    } else {
+        g_CRVGATENoLock = false;
+    }
+}
+
+void hookPostObjCRVGATESetBaseMtx(ModContext*, void* args, void* retval, void*) {
+    // If the gate is unlocked from the start, visually move the lock way out
+    // of bounds so it doesn't appear to be there
+    if (g_CRVGATENoLock) {
+        auto gate = mods::arg<daObjCRVGATE_c*>(args, 0);
+        MtxP baseMtx = gate->mpModelKey->getBaseTRMtx();
+        baseMtx[1][3] -= 100000.f;
+    }
+}
 }
 
 ModResult initialize() {
@@ -3565,6 +3618,8 @@ ModResult initialize() {
     ADD_HOOK_POST(daDitem_c__execute, hookPostDitemExecute);
     ADD_HOOK_POST(daShopItem_c__CreateInit, hookPostShopItemCreateInit);
 
+    ADD_HOOK_PRE(daKey_c__create, hookPreKeyCreate);
+
     ADD_HOOK_PRE(mgRod_lure_heart, hookPreLureHeart);
     ADD_HOOK_POST(mgRod_lure_heart, hookPostLureHeart);
 
@@ -3606,6 +3661,10 @@ ModResult initialize() {
     ADD_HOOK_POST(daObjMasterSword_c__executeWait, hookPostMasterSwordExecuteWait);
 
     ADD_HOOK_PRE(daWindStone_c__chkEveOccur, hookPreWindStoneChkEveOccur);
+
+    ADD_HOOK_POST(daObjCRVGATE_c__SetOpen, hookPostObjCRVGATESetOpen);
+    ADD_HOOK_POST(daObjCRVGATE_c__create, hookPostObjCRVGATECreate);
+    ADD_HOOK_POST(daObjCRVGATE_c__setBaseMtx, hookPostObjCRVGATESetBaseMtx);
 
     return MOD_OK;
 }
@@ -3713,6 +3772,8 @@ ModResult uninstall() {
     mods::hook::uninstall<daDitem_c__execute>(svc_hook);
     mods::hook::uninstall<daShopItem_c__CreateInit>(svc_hook);
 
+    mods::hook::uninstall<daKey_c__create>(svc_hook);
+
     mods::hook::uninstall<mgRod_lure_heart>(svc_hook);
     mods::hook::uninstall<mgRod_uki_catch>(svc_hook);
     mods::hook::uninstall<dSv_player_item_c__setEmptyBottle>(svc_hook);
@@ -3749,6 +3810,11 @@ ModResult uninstall() {
     mods::hook::uninstall<daObjMasterSword_c__executeWait>(svc_hook);
 
     mods::hook::uninstall<daWindStone_c__chkEveOccur>(svc_hook);
+
+    mods::hook::uninstall<daObjCRVGATE_c__SetOpen>(svc_hook);
+    mods::hook::uninstall<daObjCRVGATE_c__create>(svc_hook);
+    mods::hook::uninstall<daObjCRVGATE_c__setBaseMtx>(svc_hook);
+
     return MOD_OK;
 }
 }
