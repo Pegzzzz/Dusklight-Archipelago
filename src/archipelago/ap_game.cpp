@@ -41,6 +41,10 @@
 #include <thread>
 #include <unordered_map>
 
+#ifndef ARCHIPELAGO_MOD_VERSION
+#define ARCHIPELAGO_MOD_VERSION "unknown"
+#endif
+
 namespace randomizer {
 std::string UTF8ToShiftJIS(const std::string& utf8Str);
 }
@@ -776,6 +780,11 @@ void TickNewSave() {
     if (!s_job->error.empty() || s_job->hash.empty()) {
         s_newPhase = NewSavePhase::Error;
         s_newMessage = "Could not generate the seed: " + (s_job->error.empty() ? "unknown error" : s_job->error);
+        if (s_newSlot && s_newSlot->apworldVersion != ARCHIPELAGO_MOD_VERSION) {
+            s_newMessage += " (the multiworld was made with version " + s_newSlot->apworldVersion +
+                            " of the APWorld and this mod is version " ARCHIPELAGO_MOD_VERSION
+                            "; use the same version of both)";
+        }
         mods::log::error("Archipelago: {}", s_newMessage);
         if (s_client) {
             s_client->Disconnect();
