@@ -317,6 +317,15 @@ u32 getActorPatchesCurrentStageKey(u8 roomNo);
  */
 u32 getStageObjCRC32(u8* data, size_t size);
 
+namespace randomizer::logic::world {
+class World;
+}
+
+/*
+ * Builds the in-game seed data from a generated world (call WriteToFile() on the result).
+ */
+RandomizerContext WriteSeedData(randomizer::logic::world::World* world);
+
 /*
  * Generates a seed and writes the necessary seed files to the players seed directory
  * Returns true if generation was successful, false otherwise.

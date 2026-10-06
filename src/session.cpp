@@ -13,6 +13,9 @@
 #include "item.hpp"
 #include "messages.hpp"
 #include "verify_item_functions.h"
+#include "archipelago/ap_game.hpp"
+#include "archipelago/ap_seed.hpp"
+#include "archipelago/ap_ui.hpp"
 #include "../generator/utility/text.hpp"
 
 #include "d/d_com_inf_game.h"
@@ -38,11 +41,6 @@ ItemGiveHandle s_check_observer{};
 std::vector<StageActorHandle> s_stage_edits{};
 
 constexpr const char* kSeedHashBlobName = "seed_hash";
-
-struct DerivedKey {
-    int stage_id;
-    u16 key;
-};
 
 std::optional<int> parse_stage_check(const char* name, std::string_view prefix) {
     if (std::strncmp(name, prefix.data(), prefix.size()) != 0) {
@@ -131,7 +129,7 @@ bool lookup_override(
     return set_resolution(info, outResult, static_cast<uint8_t>(verifyProgressiveItem(it->second)));
 }
 
-bool resolve_check(ModContext*, const ItemCheckInfo* info, ItemCheckResolution* outResult, void*) {
+bool resolve_seed_check(const ItemCheckInfo* info, ItemCheckResolution* outResult) {
     auto& ctx = randomizer_GetContext();
 
     if (auto it = ctx.mItemLocations.find(info->name); it != ctx.mItemLocations.end()) {
@@ -183,10 +181,24 @@ bool resolve_check(ModContext*, const ItemCheckInfo* info, ItemCheckResolution* 
     return false;
 }
 
+bool resolve_check(ModContext*, const ItemCheckInfo* info, ItemCheckResolution* outResult, void*) {
+    // Items from other Archipelago worlds
+    if (archi::game::ResolveCheck(info, outResult)) {
+        return true;
+    }
+    const bool resolved = resolve_seed_check(info, outResult);
+    if (resolved) {
+        // An item for another world: remember where it came from for the get-item text
+        archi::game::NoteResolution(info->name, outResult->item);
+    }
+    return resolved;
+}
+
 void observe_give(ModContext*, const ItemGiveInfo* info, void*) {
     if (info->check_name == nullptr) {
         return;
     }
+    archi::game::ObserveGive(info);
 
     auto& ctx = randomizer_GetContext();
     if (const auto it = ctx.mItemLocations.find(info->check_name);
@@ -385,20 +397,20 @@ void registerStageEdits() {
     }
 }
 
-ModResult onNewSave(void*, ModError*) {
-    const std::string hash = g_pending_seed_hash;
+ModResult onNewSave(void*, ModError* error) {
+    const std::string hash = archi::game::PendingSeedHash();
     if (hash.empty())
-        return MOD_ERROR;
+        return mods::set_error(error, MOD_ERROR, "no Archipelago seed was prepared for this save");
 
     deactivateSeed();
     if (!activateSeed(hash.c_str()))
-        return MOD_ERROR;
+        return mods::set_error(error, MOD_ERROR, "failed to activate the Archipelago seed");
 
     svc_mng.save->set_blob(svc_mng.mod_ctx, kSeedHashBlobName, hash.data(), hash.size());
     setAncientDocumentNum(0);
     setupRandomizerFile();
     saveAncientDocumentNum();
-    return MOD_OK;
+    return archi::game::OnNewSave();
 }
 
 ModResult onSaveLoaded(void*, ModError*) {
@@ -416,19 +428,26 @@ ModResult onSaveLoaded(void*, ModError*) {
         return MOD_ERROR;
     }
 
-    if (randomizer_GetContext().mHash != hash) {
+    // Rebuilds the seed from the Archipelago slot data if its files are missing or obsolete
+    const std::string activeHash = archi::game::PrepareSeed(hash);
+    if (activeHash != hash) {
+        svc_mng.save->set_blob(svc_mng.mod_ctx, kSeedHashBlobName, activeHash.data(), activeHash.size());
+    }
+
+    if (randomizer_GetContext().mHash != activeHash) {
         deactivateSeed();
-        activateSeed(hash.c_str());
+        activateSeed(activeHash.c_str());
     }
 
     loadAncientDocumentNum();
-    return MOD_OK;
+    return archi::game::OnSaveLoaded();
 }
 
 void onSaveWritten(ModContext*, uint32_t, void*) {
     const std::string hash = randomizer_GetContext().mHash;
     svc_mng.save->set_blob(svc_mng.mod_ctx, kSeedHashBlobName, hash.data(), hash.size());
     saveAncientDocumentNum();
+    archi::game::OnSaveWritten();
 }
 
 void preLoadRandomizerData() {
@@ -471,18 +490,21 @@ ModResult onGameModeActivated(void*, ModError* error) {
         return mods::set_error(error, result, "failed to initialize ui");
     }
 
+    result = archi::game::OnActivated();
+    if (result != MOD_OK) {
+        return mods::set_error(error, result, "failed to initialize Archipelago");
+    }
+
     // Preload certain data to prevent hitching that would happen if loading the data as necessary
     std::thread preLoadDataThread{preLoadRandomizerData};
     preLoadDataThread.detach();
 
-    mods::log::info("randomizer game mode activated");
+    mods::log::info("Archipelago game mode activated");
     return MOD_OK;
 }
 
 ModResult onNewSaveSelect(void* user_data, GameModeNewSaveState* state, ModError* out_error) {
-    ui::g_dialogSelectModeState = state;
-
-    ModResult rt = ui::buildFileSelectGateMenu();
+    ModResult rt = archi::game::OnNewSaveSelect(state);
     if (rt != MOD_OK) {
         return mods::set_error(out_error, rt, "Failed to build menu");
     }
@@ -490,7 +512,13 @@ ModResult onNewSaveSelect(void* user_data, GameModeNewSaveState* state, ModError
     return MOD_OK;
 }
 
+ModResult onGameReset(void*, ModError*) {
+    archi::game::OnGameReset();
+    return MOD_OK;
+}
+
 void shutdown() {
+    archi::game::OnDeactivated();
     deactivateSeed();
     hooks::uninstall();
     ui::shutdown();
@@ -501,13 +529,14 @@ void shutdown() {
 ModResult onGameModeDeactivated(void*, ModError*) {
     shutdown();
 
-    mods::log::info("randomizer game mode deactivated");
+    mods::log::info("Archipelago game mode deactivated");
     return MOD_OK;
 }
 
 ModResult onGameModeUpdate(void*, ModError*) {
     ui::update();
     session::update();
+    archi::game::Tick();
     return MOD_OK;
 }
 
@@ -519,17 +548,24 @@ ModResult initialize(const ServiceManager& services) {
         return result;
     }
 
+    result = archi::game::Initialize();
+    if (result != MOD_OK) {
+        return result;
+    }
+
+    // Its own game mode and save files, so it can be installed next to the randomizer mod
     constexpr GameModeDesc gameModeDesc{
         .struct_size = sizeof(GameModeDesc),
-        .game_mode_id = "randomizer",
-        .full_name = "Randomizer",
-        .save_name = "randomizer",
+        .game_mode_id = "archipelago",
+        .full_name = "Archipelago",
+        .save_name = "tpd-archipelago",
         .user_data = nullptr,
         .on_activated = onGameModeActivated,
         .on_deactivated = onGameModeDeactivated,
         .on_save_loaded = onSaveLoaded,
         .on_new_save = onNewSave,
         .on_new_save_select = onNewSaveSelect,
+        .on_game_reset = onGameReset,
         .on_tick = onGameModeUpdate,
     };
     result = svc_game_mode->register_game_mode(mod_ctx, &gameModeDesc);
@@ -538,11 +574,7 @@ ModResult initialize(const ServiceManager& services) {
     }
 
     UiModsPanelDesc panelDesc = UI_MODS_PANEL_DESC_INIT;
-    panelDesc.build = [](ModContext* ctx, UiElementHandle pane, void*, ModError*) -> ModResult {
-        return svc_ui->pane_add_text(ctx, pane,
-            "To play, select \"Randomizer\" from the Dusklight menu, then create a new save.",
-            nullptr);
-    };
+    panelDesc.build = archi::ui::BuildModsPanel;
     result = svc_ui->register_mods_panel(mod_ctx, &panelDesc);
     return result;
 }

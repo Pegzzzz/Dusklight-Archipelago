@@ -1,0 +1,1370 @@
+#include "ap_game.hpp"
+
+#include "ap_seed.hpp"
+#include "ap_transport.hpp"
+#include "ap_ui.hpp"
+
+#include "../item_ids.h"
+#include "../paths.hpp"
+#include "../randomizer_context.hpp"
+#include "../session.hpp"
+#include "../stages.h"
+#include "../tools.h"
+#include "../verify_item_functions.h"
+#include "../../generator/randomizer.hpp"
+
+#include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_b_gnd.h"
+#include "d/d_com_inf_game.h"
+#include "f_op/f_op_actor_mng.h"
+
+#include <mods/items.h>
+#include <mods/svc/config.h>
+#include <mods/svc/flow.hpp>
+#include <mods/svc/log.hpp>
+#include <mods/svc/ui.h>
+
+#include <fmt/format.h>
+
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <random>
+#include <set>
+#include <sstream>
+#include <thread>
+#include <unordered_map>
+
+namespace randomizer {
+std::string UTF8ToShiftJIS(const std::string& utf8Str);
+}
+
+namespace randomizer::archi::game {
+namespace {
+
+using nlohmann::json;
+using session::svc_mng;
+
+constexpr const char* kGame = "Twilight Princess Dusklight";
+constexpr const char* kStateBlobName = "archipelago";
+constexpr const char* kReceivePrefix = "ap:recv:";
+constexpr uint16_t kForeignItemMessage = 0xDC + 0x65;  // get-item text of item 0xDC
+constexpr int kScanInterval = 10;                      // frames between flag scans
+constexpr size_t kMaxLogLines = 200;
+
+int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+double UnixSeconds() {
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Files
+
+std::filesystem::path ArchipelagoDir() {
+    return paths::GetRandomizerPath() / "archipelago";
+}
+
+std::filesystem::path SeedWorkDir(const std::string& seed) {
+    return ArchipelagoDir() / "seeds" / seed;
+}
+
+std::filesystem::path SlotDataPath(const std::string& seed) {
+    return SeedWorkDir(seed) / "slot_data.json";
+}
+
+bool WriteText(const std::filesystem::path& path, const std::string& text) {
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file << text;
+    return static_cast<bool>(file);
+}
+
+std::optional<std::string> ReadText(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    return std::string{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+std::string SafeFileName(const std::string& text) {
+    std::string out;
+    for (const unsigned char c : text) {
+        out += std::isalnum(c) || c == '-' || c == '_' ? static_cast<char>(c) : '_';
+    }
+    return out.substr(0, 80);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Config
+
+ConfigVarHandle s_cfgServer{};
+ConfigVarHandle s_cfgSlot{};
+ConfigVarHandle s_cfgUuid{};
+ConfigVarHandle s_cfgToasts{};
+
+std::string GetConfigString(ConfigVarHandle var) {
+    size_t length = 0;
+    if (var == 0 || svc_mng.config->get_string(mod_ctx, var, nullptr, 0, &length) != MOD_OK) {
+        return {};
+    }
+    std::string value(length + 1, '\0');
+    if (svc_mng.config->get_string(mod_ctx, var, value.data(), value.size(), &length) != MOD_OK) {
+        return {};
+    }
+    value.resize(length);
+    return value;
+}
+
+void RegisterConfig() {
+    auto registerString = [](const char* name, ConfigVarHandle& out) {
+        ConfigVarDesc desc = CONFIG_VAR_DESC_INIT;
+        desc.name = name;
+        desc.type = CONFIG_VAR_STRING;
+        svc_mng.config->register_var(mod_ctx, &desc, &out);
+    };
+    registerString("ap_last_server", s_cfgServer);
+    registerString("ap_last_slot", s_cfgSlot);
+    registerString("ap_client_uuid", s_cfgUuid);
+    ConfigVarDesc toasts = CONFIG_VAR_DESC_INIT;
+    toasts.name = "ap_notifications";
+    toasts.type = CONFIG_VAR_BOOL;
+    toasts.default_bool = true;
+    svc_mng.config->register_var(mod_ctx, &toasts, &s_cfgToasts);
+
+    if (GetConfigString(s_cfgUuid).empty()) {
+        std::mt19937_64 random{std::random_device{}()};
+        svc_mng.config->set_string(mod_ctx, s_cfgUuid, fmt::format("{:016x}", random()).c_str());
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Items and locations of the active save
+
+struct ItemInfo {
+    std::string name;
+};
+
+const std::unordered_map<uint8_t, std::string>& ItemNames() {
+    static const std::unordered_map<uint8_t, std::string> names = [] {
+        std::unordered_map<uint8_t, std::string> out;
+        auto tree = LOAD_EMBED_YAML(RANDO_DATA_PATH "items.yaml");
+        for (const auto& node : tree) {
+            out[static_cast<uint8_t>(node["Id"].as<int>())] = node["Name"].as<std::string>();
+        }
+        return out;
+    }();
+    return names;
+}
+
+enum class FlagKind : uint8_t { None, Tbox, Switch, Item, Event };
+
+struct TrackedLocation {
+    const ApLocation* ap = nullptr;
+    FlagKind kind = FlagKind::None;
+    int stage = -1;
+    uint16_t flag = 0;
+};
+
+enum CheckKind : uint64_t {
+    kCheckChest = 1,
+    kCheckPoe,
+    kCheckFreestanding,
+    kCheckGoldenWolf,
+    kCheckShop,
+    kCheckSky,
+    kCheckBug,
+};
+
+uint64_t CheckKey(CheckKind kind, uint64_t key) {
+    return (static_cast<uint64_t>(kind) << 32) | (key & 0xFFFFFFFFu);
+}
+
+struct SaveState {
+    ConnectionForm connection;
+    std::string seed;        // slot seed ("AP...") the save was created for
+    std::string seedHash;    // randomizer seed hash
+    size_t received = 0;     // items from the server applied to this save
+    bool deathLink = false;
+    bool goal = false;
+};
+
+struct Runtime {
+    SaveState save;
+    bool active = false;  // a save of this game mode is loaded
+    std::optional<SlotData> slot;
+    std::vector<TrackedLocation> locations;
+    std::unordered_map<uint64_t, size_t> byCheckKey;
+    std::unordered_map<std::string, size_t> byCheckName;
+    std::set<int64_t> checked;
+    size_t queuedItems = 0;      // server items handed to the give queue (index)
+    std::set<size_t> doneItems;  // completed gives not yet contiguous with save.received
+    int scanTimer = 0;
+    bool wasDead = false;
+    int64_t deathLinkReceivedAt = -1;
+    bool goalSent = false;
+    // The last foreign item a check resolved to, for the get-item text
+    const ApLocation* lastForeign = nullptr;
+    // Received items announced as "N items received" instead of one by one
+    std::vector<std::string> pendingReceived;
+};
+
+Runtime s_rt;
+
+std::unique_ptr<ApClient> s_client;
+std::deque<std::string> s_log;
+uint64_t s_logVersion = 0;
+std::vector<mods::flow::MessageOverride> s_messageOverrides;
+
+// ---------------------------------------------------------------------------------------------
+// Notifications
+
+bool NotificationsOn() {
+    bool value = true;
+    if (s_cfgToasts != 0) {
+        svc_mng.config->get_bool(mod_ctx, s_cfgToasts, &value);
+    }
+    return value;
+}
+
+void Toast(const std::string& titleRml, const std::string& bodyRml, const char* type = nullptr,
+    uint32_t durationMs = 0) {
+    if (!NotificationsOn()) {
+        return;
+    }
+    UiToastDesc desc = UI_TOAST_DESC_INIT;
+    desc.type = type;
+    desc.title_rml = titleRml.empty() ? nullptr : titleRml.c_str();
+    desc.body_rml = bodyRml.empty() ? nullptr : bodyRml.c_str();
+    desc.duration_ms = durationMs;
+    svc_mng.ui->push_toast(mod_ctx, &desc);
+}
+
+std::string Colored(const std::string& text, const char* color) {
+    return fmt::format("<span style=\"color: {};\">{}</span>", color, EscapeRml(text));
+}
+
+const char* ItemColor(int flags) {
+    if (flags & kNetItemProgression) {
+        return "#af99ef";
+    }
+    if (flags & kNetItemUseful) {
+        return "#6d8be8";
+    }
+    if (flags & kNetItemTrap) {
+        return "#fa8072";
+    }
+    return "#00eeee";
+}
+
+void AddLog(const std::string& rml) {
+    s_log.push_back(rml);
+    while (s_log.size() > kMaxLogLines) {
+        s_log.pop_front();
+    }
+    ++s_logVersion;
+}
+
+std::string MessageRml(const ApMessage& message) {
+    std::string rml;
+    for (const auto& part : message.parts) {
+        switch (part.kind) {
+        case MessagePart::Kind::OwnPlayer:
+            rml += Colored(part.text, "#ee00ee");
+            break;
+        case MessagePart::Kind::Player:
+            rml += Colored(part.text, "#fafad2");
+            break;
+        case MessagePart::Kind::Item:
+            rml += Colored(part.text, ItemColor(part.itemFlags));
+            break;
+        case MessagePart::Kind::Location:
+            rml += Colored(part.text, "#00ff7f");
+            break;
+        case MessagePart::Kind::Entrance:
+            rml += Colored(part.text, "#6495ed");
+            break;
+        default:
+            rml += EscapeRml(part.text);
+            break;
+        }
+    }
+    return rml;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Location index
+
+void BuildLocationIndex() {
+    s_rt.locations.clear();
+    s_rt.byCheckKey.clear();
+    s_rt.byCheckName.clear();
+    if (!s_rt.slot) {
+        return;
+    }
+
+    std::unordered_map<std::string, YAML::Node> metadata;
+    auto tree = LOAD_EMBED_YAML(RANDO_DATA_PATH "locations.yaml");
+    for (const auto& node : tree) {
+        metadata[node["Name"].as<std::string>()] = node["Metadata"];
+    }
+
+    for (const auto& ap : s_rt.slot->locations) {
+        TrackedLocation tracked;
+        tracked.ap = &ap;
+        const size_t index = s_rt.locations.size();
+        auto found = metadata.find(ap.name);
+        if (found == metadata.end() || !found->second.IsMap()) {
+            mods::log::warn("Archipelago: no metadata for location {}", ap.name);
+            s_rt.locations.push_back(tracked);
+            continue;
+        }
+        YAML::Node meta = found->second;
+        auto stageOf = [](const YAML::Node& node) { return getStageSaveId(node["Stage"].as<int>()); };
+
+        // Same precedence as the tracker (isLocationMetadataObtained)
+        if (auto chest = meta["Chest"]) {
+            tracked.kind = FlagKind::Tbox;
+            tracked.stage = stageOf(chest[0]);
+            tracked.flag = chest[0]["Tbox Id"].as<uint16_t>();
+        } else if (auto poe = meta["Poe"]) {
+            tracked.kind = FlagKind::Switch;
+            tracked.stage = stageOf(poe[0]);
+            tracked.flag = poe[0]["Flag"].as<uint16_t>();
+        } else if (auto item = meta["Freestanding Item"]) {
+            tracked.kind = ap.name == "Forest Temple Big Baba Key" ? FlagKind::Tbox : FlagKind::Item;
+            tracked.stage = stageOf(item[0]);
+            tracked.flag = item[0]["Flag"].as<uint16_t>();
+        } else if (auto event = meta["Event Flag"]) {
+            tracked.kind = FlagKind::Event;
+            tracked.flag = event.as<uint16_t>();
+        } else if (auto wolf = meta["Golden Wolf"]) {
+            tracked.kind = FlagKind::Event;
+            tracked.flag = wolf[0]["Flag"].as<uint16_t>();
+        } else if (auto sw = meta["Switch Flag"]) {
+            tracked.kind = FlagKind::Switch;
+            tracked.stage = stageOf(sw);
+            tracked.flag = sw["Flag"].as<uint16_t>();
+        } else if (auto itemFlag = meta["Item Flag"]) {
+            tracked.kind = FlagKind::Item;
+            tracked.stage = stageOf(itemFlag);
+            tracked.flag = itemFlag["Flag"].as<uint16_t>();
+        } else if (auto insect = meta["Twilit Insect"]) {
+            tracked.kind = FlagKind::Tbox;
+            tracked.stage = stageOf(insect[0]);
+            tracked.flag = insect[0]["Flag"].as<uint16_t>();
+        }
+        if (tracked.kind != FlagKind::Event && tracked.kind != FlagKind::None &&
+            (tracked.stage < 0 || tracked.stage == 0xFF))
+        {
+            tracked.kind = FlagKind::None;
+        }
+
+        // Item service check names that give this location's item
+        auto stageKey = [](const YAML::Node& node, const char* field) {
+            return (node["Stage"].as<uint64_t>() << 8) | (node[field].as<uint64_t>() & 0xFF);
+        };
+        if (auto chest = meta["Chest"]) {
+            s_rt.byCheckKey[CheckKey(kCheckChest, stageKey(chest[0], "Tbox Id"))] = index;
+        }
+        if (auto poe = meta["Poe"]) {
+            s_rt.byCheckKey[CheckKey(kCheckPoe, stageKey(poe[0], "Flag"))] = index;
+        }
+        if (auto item = meta["Freestanding Item"]) {
+            s_rt.byCheckKey[CheckKey(kCheckFreestanding, stageKey(item[0], "Flag"))] = index;
+        }
+        if (auto wolf = meta["Golden Wolf"]) {
+            s_rt.byCheckKey[CheckKey(kCheckGoldenWolf, wolf[0]["Flag"].as<uint64_t>())] = index;
+        }
+        if (auto shop = meta["Shop"]) {
+            const uint64_t key = (shop[0]["Stage"].as<uint64_t>() << 16) |
+                                 (shop[0]["Room"].as<uint64_t>() << 8) | (shop[0]["Item"].as<uint64_t>() & 0xFF);
+            s_rt.byCheckKey[CheckKey(kCheckShop, key)] = index;
+        }
+        if (auto sky = meta["Sky Character"]) {
+            s_rt.byCheckKey[CheckKey(kCheckSky, stageKey(sky[0], "Room"))] = index;
+        }
+        if (auto bug = meta["Bug Reward"]) {
+            s_rt.byCheckKey[CheckKey(kCheckBug, bug[0]["Item Id"].as<uint64_t>())] = index;
+        }
+        if (auto lookup = meta["Name Lookup"]) {
+            s_rt.byCheckName[nameLookupOverride(lookup[0].as<std::string>())] = index;
+        }
+        s_rt.byCheckName[ap.name] = index;
+        s_rt.locations.push_back(tracked);
+    }
+}
+
+std::optional<size_t> LocationForCheck(const char* name) {
+    if (name == nullptr) {
+        return std::nullopt;
+    }
+    auto byKey = [](CheckKind kind, uint64_t key) -> std::optional<size_t> {
+        const auto it = s_rt.byCheckKey.find(CheckKey(kind, key));
+        return it == s_rt.byCheckKey.end() ? std::nullopt : std::optional{it->second};
+    };
+    if (const auto it = s_rt.byCheckName.find(name); it != s_rt.byCheckName.end()) {
+        return it->second;
+    }
+    if (auto key = session::parse_derived(name, ITEM_CHECK_CHEST_PREFIX)) {
+        return byKey(kCheckChest, key->key);
+    }
+    if (auto key = session::parse_derived(name, ITEM_CHECK_FREESTANDING_PREFIX)) {
+        if (key->stage_id == Ook) {
+            if (const auto it = s_rt.byCheckName.find("Forest Temple Gale Boomerang");
+                it != s_rt.byCheckName.end())
+            {
+                return it->second;
+            }
+        }
+        return byKey(kCheckFreestanding, key->key);
+    }
+    if (auto flag = session::parse_flag_check(name, ITEM_CHECK_GOLDEN_WOLF_PREFIX)) {
+        return byKey(kCheckGoldenWolf, *flag);
+    }
+    if (auto key = session::parse_derived(name, ITEM_CHECK_POE_PREFIX)) {
+        return byKey(kCheckPoe, key->key);
+    }
+    if (auto stage = session::parse_stage_check(name, ITEM_CHECK_BOSS_PREFIX)) {
+        return byKey(kCheckFreestanding, (static_cast<uint64_t>(*stage) << 8) | 0x9F);
+    }
+    if (auto key = session::parse_shop_check(name, ITEM_CHECK_SHOP_PREFIX)) {
+        return byKey(kCheckShop, *key);
+    }
+    if (auto key = session::parse_derived(name, ITEM_CHECK_SKY_PREFIX)) {
+        return byKey(kCheckSky, key->key);
+    }
+    constexpr std::string_view bugPrefix{ITEM_CHECK_BUG_PREFIX};
+    if (std::strncmp(name, bugPrefix.data(), bugPrefix.size()) == 0) {
+        return byKey(kCheckBug, static_cast<uint64_t>(std::atoi(name + bugPrefix.size())) & 0xFF);
+    }
+    return std::nullopt;
+}
+
+bool IsObtained(const TrackedLocation& location) {
+    switch (location.kind) {
+    case FlagKind::Tbox:
+        return dComIfGs_isStageTbox(location.stage, location.flag);
+    case FlagKind::Switch:
+        return tracker_isStageSwitch(location.stage, location.flag);
+    case FlagKind::Item:
+        return tracker_isStageItem(location.stage, location.flag);
+    case FlagKind::Event:
+        return tracker_isEventBit(location.flag);
+    case FlagKind::None:
+        break;
+    }
+    return false;
+}
+
+void MarkChecked(const std::vector<int64_t>& ids) {
+    std::vector<int64_t> fresh;
+    for (const int64_t id : ids) {
+        if (s_rt.checked.insert(id).second) {
+            fresh.push_back(id);
+        }
+    }
+    if (!fresh.empty() && s_client) {
+        s_client->CheckLocations(fresh);
+    }
+}
+
+std::vector<int64_t> ScanFlags() {
+    std::vector<int64_t> found;
+    for (const auto& location : s_rt.locations) {
+        if (location.ap != nullptr && !s_rt.checked.contains(location.ap->id) && IsObtained(location)) {
+            found.push_back(location.ap->id);
+        }
+    }
+    return found;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Save blob
+
+json SaveToJson(const SaveState& save) {
+    return {
+        {"version", 1},
+        {"server", save.connection.server},
+        {"slot", save.connection.slot},
+        {"password", save.connection.password},
+        {"seed", save.seed},
+        {"seed_hash", save.seedHash},
+        {"received", save.received},
+        {"death_link", save.deathLink},
+        {"goal", save.goal},
+    };
+}
+
+std::optional<SaveState> ReadSaveBlob() {
+    size_t size = 0;
+    if (svc_mng.save->get_blob(mod_ctx, kStateBlobName, nullptr, &size) != MOD_OK || size == 0) {
+        return std::nullopt;
+    }
+    std::string text(size, '\0');
+    if (svc_mng.save->get_blob(mod_ctx, kStateBlobName, text.data(), &size) != MOD_OK) {
+        return std::nullopt;
+    }
+    try {
+        const json data = json::parse(text);
+        SaveState save;
+        save.connection.server = data.value("server", "");
+        save.connection.slot = data.value("slot", "");
+        save.connection.password = data.value("password", "");
+        save.seed = data.value("seed", "");
+        save.seedHash = data.value("seed_hash", "");
+        save.received = data.value("received", size_t{0});
+        save.deathLink = data.value("death_link", false);
+        save.goal = data.value("goal", false);
+        return save;
+    } catch (const std::exception& e) {
+        mods::log::error("Archipelago: unreadable save state: {}", e.what());
+        return std::nullopt;
+    }
+}
+
+void WriteSaveBlob() {
+    if (!s_rt.active) {
+        return;
+    }
+    const std::string text = SaveToJson(s_rt.save).dump();
+    svc_mng.save->set_blob(mod_ctx, kStateBlobName, text.data(), text.size());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Get-item text for other players' items
+
+std::string WrapLine(const std::string& text, size_t width, size_t maxLines) {
+    std::string out;
+    std::string line;
+    size_t lines = 1;
+    std::istringstream words{text};
+    std::string word;
+    while (words >> word) {
+        if (!line.empty() && line.size() + 1 + word.size() > width) {
+            if (lines == maxLines) {
+                line += "...";
+                break;
+            }
+            out += line + "\n";
+            line.clear();
+            ++lines;
+        }
+        line += (line.empty() ? "" : " ") + word.substr(0, width);
+    }
+    return out + line;
+}
+
+std::string ColorCode(uint8_t color) {
+    return std::string{"\x1A\x06\xFF\x00\x00", 5} + static_cast<char>(color);
+}
+
+std::string ForeignGetText(int language) {
+    const ApLocation* location = s_rt.lastForeign;
+    const std::string white = ColorCode(0);
+    const std::string yellow = ColorCode(4);
+    uint8_t itemColor = 2;  // filler: green
+    if (location != nullptr) {
+        if (location->flags & kItemProgression) {
+            itemColor = 6;  // purple
+        } else if (location->flags & kItemUseful) {
+            itemColor = 3;  // light blue
+        } else if (location->flags & kItemTrap) {
+            itemColor = 1;  // red
+        }
+    }
+    const std::string owner = location ? SanitizeForGameText(location->owner, 24) : std::string{};
+    const std::string item = location ? WrapLine(SanitizeForGameText(location->item, 64), 30, 2) : std::string{};
+
+    std::string text;
+    if (location == nullptr) {
+        switch (language) {
+        case MESSAGE_LANGUAGE_GERMAN:
+            return "Du hast einen Gegenstand f\xFCr eine\nandere Welt gefunden!";
+        case MESSAGE_LANGUAGE_FRENCH:
+            return "Vous avez trouv\xE9 un objet\npour un autre monde !";
+        case MESSAGE_LANGUAGE_SPANISH:
+            return "\xA1Has encontrado un objeto\npara otro mundo!";
+        case MESSAGE_LANGUAGE_ITALIAN:
+            return "Hai trovato un oggetto\nper un altro mondo!";
+        case MESSAGE_LANGUAGE_JAPANESE:
+            return UTF8ToShiftJIS("別の世界のアイテムを\n見つけた！");
+        default:
+            return "You found an item for\nanother world!";
+        }
+    }
+    const std::string coloredOwner = yellow + owner + white;
+    const std::string coloredItem = ColorCode(itemColor) + item + white;
+    switch (language) {
+    case MESSAGE_LANGUAGE_GERMAN:
+        return "Du hast etwas f\xFCr " + coloredOwner + " gefunden:\n" + coloredItem + "!";
+    case MESSAGE_LANGUAGE_FRENCH:
+        return "Vous avez trouv\xE9 pour " + coloredOwner + " :\n" + coloredItem + " !";
+    case MESSAGE_LANGUAGE_SPANISH:
+        return "\xA1Has encontrado para " + coloredOwner + ":\n" + coloredItem + "!";
+    case MESSAGE_LANGUAGE_ITALIAN:
+        return "Hai trovato per " + coloredOwner + ":\n" + coloredItem + "!";
+    case MESSAGE_LANGUAGE_JAPANESE:
+        return coloredOwner + UTF8ToShiftJIS("のアイテム：") + "\n" + coloredItem;
+    default:
+        return "You found " + coloredOwner + "'s\n" + coloredItem + "!";
+    }
+}
+
+bool ForeignItemMessage(
+    ModContext*, const MessageOverrideContext* message, MessageTextData* outText, void*) {
+    if (message == nullptr || outText == nullptr || !s_rt.active) {
+        return false;
+    }
+    thread_local std::vector<uint8_t> buffer;
+    const std::string text = ForeignGetText(message->language);
+    buffer.assign(text.begin(), text.end());
+    buffer.push_back(0);
+    outText->text = buffer.data();
+    outText->text_size = buffer.size();
+    return true;
+}
+
+void RegisterMessageOverrides() {
+    s_messageOverrides.clear();
+    for (const auto language : {MESSAGE_LANGUAGE_ENGLISH, MESSAGE_LANGUAGE_GERMAN, MESSAGE_LANGUAGE_FRENCH,
+             MESSAGE_LANGUAGE_SPANISH, MESSAGE_LANGUAGE_ITALIAN, MESSAGE_LANGUAGE_JAPANESE})
+    {
+        auto handle = mods::flow::override_message_fn(0, kForeignItemMessage, language, ForeignItemMessage);
+        if (!handle) {
+            mods::log::warn("Archipelago: could not override get-item message {} ({})", kForeignItemMessage,
+                static_cast<int>(handle.result()));
+        }
+        s_messageOverrides.push_back(std::move(handle));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Network listener
+
+class Listener final : public ApListener {
+public:
+    void OnStateChanged(ApState state, const std::string& detail) override;
+    void OnConnected(const json& slotData) override;
+    void OnMessage(const ApMessage& message) override;
+    void OnDeathLink(const std::string& source, const std::string& cause) override;
+};
+
+Listener s_listener;
+
+// New save flow
+ConnectionForm s_newForm;
+NewSavePhase s_newPhase = NewSavePhase::Idle;
+std::string s_newMessage;
+std::string s_pendingHash;
+std::optional<SlotData> s_newSlot;
+std::string s_newSlotJson;
+
+struct GenerationJob {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    std::string error;
+    std::string hash;
+};
+std::unique_ptr<GenerationJob> s_job;
+
+ApClient& EnsureClient() {
+    if (!s_client) {
+        s_client = std::make_unique<ApClient>(transport::Create, &s_listener);
+        const auto cacheDir = ArchipelagoDir() / "datapackage";
+        s_client->SetDataPackageCache({
+            [cacheDir](const std::string& game, const std::string& checksum) {
+                return ReadText(cacheDir / (SafeFileName(game) + "_" + SafeFileName(checksum) + ".json"));
+            },
+            [cacheDir](const std::string& game, const std::string& checksum, const std::string& data) {
+                WriteText(cacheDir / (SafeFileName(game) + "_" + SafeFileName(checksum) + ".json"), data);
+            },
+        });
+    }
+    return *s_client;
+}
+
+ApClientConfig MakeConfig(const ConnectionForm& form, bool autoReconnect, bool deathLink) {
+    ApClientConfig config;
+    config.address = form.server;
+    config.slotName = form.slot;
+    config.password = form.password;
+    config.game = kGame;
+    config.uuid = GetConfigString(s_cfgUuid);
+    config.itemsHandling = kItemsHandlingOtherWorlds | kItemsHandlingStartInventory;
+    config.autoReconnect = autoReconnect;
+    if (deathLink) {
+        config.tags.push_back("DeathLink");
+    }
+    return config;
+}
+
+void Listener::OnStateChanged(ApState state, const std::string& detail) {
+    if (s_newPhase == NewSavePhase::Connecting && state == ApState::Failed) {
+        s_newPhase = NewSavePhase::Error;
+        s_newMessage = detail;
+        return;
+    }
+    if (!s_rt.active) {
+        return;
+    }
+    if (state == ApState::Connected) {
+        AddLog(EscapeRml("Connected to " + s_rt.save.connection.server + " as " + s_rt.save.connection.slot + "."));
+        Toast("Archipelago", EscapeRml("Connected as " + s_rt.save.connection.slot));
+    } else if (state == ApState::Waiting) {
+        AddLog(EscapeRml(detail + " (retrying)"));
+        Toast("Archipelago", EscapeRml(detail), "warning");
+    } else if (state == ApState::Failed) {
+        AddLog(EscapeRml(detail));
+        Toast("Archipelago", EscapeRml(detail), "warning", 8000);
+    }
+}
+
+void Listener::OnConnected(const json& slotData) {
+    if (s_newPhase == NewSavePhase::Connecting) {
+        std::string error;
+        auto slot = SlotData::Parse(slotData, error);
+        if (!slot) {
+            s_newPhase = NewSavePhase::Error;
+            s_newMessage = error;
+            s_client->Disconnect();
+            return;
+        }
+        s_newSlot = std::move(slot);
+        s_newSlotJson = slotData.dump();
+        s_newPhase = NewSavePhase::Generating;
+        s_newMessage = "Connected. Generating the seed...";
+
+        // Generation inputs and outputs live in the mod data folder
+        const std::string seed = s_newSlot->seed;
+        const auto workDir = SeedWorkDir(seed);
+        WriteText(SlotDataPath(seed), s_newSlotJson);
+        const auto dataDir = paths::GetRandomizerPath();
+        s_job = std::make_unique<GenerationJob>();
+        GenerationJob* job = s_job.get();
+        SlotData slotCopy = *s_newSlot;
+        job->thread = std::thread([job, slotCopy, dataDir, workDir] {
+            try {
+                Randomizer rando{dataDir};
+                if (auto error = GenerateWorlds(rando, workDir, slotCopy)) {
+                    job->error = *error;
+                } else if (auto problems = VerifyPlacements(rando, slotCopy); !problems.empty()) {
+                    job->error = fmt::format("{} location(s) do not match the multiworld, for example {}",
+                        problems.size(), problems.front());
+                } else {
+                    RandomizerContext context = WriteSeedData(rando.GetWorld());
+                    context.mHash = rando.GetConfig().GetHash();
+                    if (auto error = context.WriteToFile()) {
+                        job->error = *error;
+                    } else {
+                        job->hash = context.mHash;
+                    }
+                }
+            } catch (const std::exception& e) {
+                job->error = e.what();
+            }
+            job->done = true;
+        });
+        return;
+    }
+
+    if (!s_rt.active) {
+        return;
+    }
+    // Make sure this is the room the save belongs to
+    const std::string seed = slotData.value("seed", "");
+    if (seed != s_rt.save.seed) {
+        const std::string message = "This room is not the one this save was created for (seed " + seed +
+                                    ", save " + s_rt.save.seed + "). Disconnected.";
+        mods::log::error("Archipelago: {}", message);
+        s_client->Disconnect();
+        AddLog(EscapeRml(message));
+        Toast("Archipelago", EscapeRml(message), "warning", 10000);
+        return;
+    }
+    if (s_rt.save.goal) {
+        s_client->SetGoalReached();
+    }
+    s_rt.goalSent = s_rt.save.goal;
+}
+
+void Listener::OnMessage(const ApMessage& message) {
+    if (message.type == "" && message.Plain().find("compressed websocket") != std::string::npos) {
+        // The server suggests a compressed connection; nothing a player can act on
+        mods::log::info("Archipelago: {}", message.Plain());
+        return;
+    }
+    AddLog(MessageRml(message));
+    if (!s_rt.active || !s_client) {
+        return;
+    }
+    const int me = s_client->Slot();
+    if ((message.type == "ItemSend" || message.type == "ItemCheat") && message.item) {
+        const auto& item = *message.item;
+        if (item.player == me && message.receiving != me) {
+            // An item from this world went to someone else
+            std::string itemName = s_client->ItemName(item.item, message.receiving);
+            if (const auto* location = s_rt.slot ? s_rt.slot->FindById(item.location) : nullptr) {
+                itemName = location->item;
+            }
+            Toast("Sent", Colored(itemName, ItemColor(item.flags)) + " to " +
+                              Colored(s_client->PlayerName(message.receiving), "#fafad2"));
+        }
+    } else if (message.type == "Hint" && message.item) {
+        if (!message.found && (message.receiving == me || message.item->player == me)) {
+            Toast("Hint", MessageRml(message), nullptr, 8000);
+        }
+    } else if (message.type == "Chat" || message.type == "ServerChat") {
+        Toast("", MessageRml(message));
+    } else if (message.type == "Countdown") {
+        Toast("", MessageRml(message), nullptr, 1500);
+    }
+}
+
+void Listener::OnDeathLink(const std::string& source, const std::string& cause) {
+    if (!s_rt.active || !s_rt.save.deathLink) {
+        return;
+    }
+    const std::string text = cause.empty() ? source + " died." : cause;
+    AddLog(EscapeRml("DeathLink: " + text));
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (link == nullptr || playerIsOnTitleScreen() || link->mProcID == daAlink_c::PROC_DEAD) {
+        return;
+    }
+    Toast("DeathLink", EscapeRml(text), "warning");
+    s_rt.deathLinkReceivedAt = NowMs();
+    dComIfGs_setLife(0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-frame work
+
+void ProcessReceivedItems() {
+    if (!s_client || !s_rt.active || !randomizer_IsActive() || randomizer_GetContext().mCreatingSave) {
+        return;
+    }
+    const auto& items = s_client->Items();
+    s_rt.queuedItems = std::max(s_rt.queuedItems, s_rt.save.received);
+    const int64_t itemBase = s_rt.slot ? s_rt.slot->itemIdBase : 0;
+    while (s_rt.queuedItems < items.size()) {
+        const size_t index = s_rt.queuedItems++;
+        const auto& item = items[index];
+        const int64_t local = item.item - itemBase;
+        if (local < 0 || local > 0xFE || !ItemNames().contains(static_cast<uint8_t>(local))) {
+            mods::log::warn("Archipelago: ignoring unknown item {} (index {})", item.item, index);
+            s_rt.doneItems.insert(index);
+            continue;
+        }
+        const std::string name = std::string{kReceivePrefix} + std::to_string(index);
+        svc_mng.item->give_item(mod_ctx, name.c_str(), static_cast<uint8_t>(local),
+            ITEM_GIVE_SILENT | ITEM_GIVE_RESOLVE);
+    }
+    while (s_rt.doneItems.erase(s_rt.save.received) != 0) {
+        ++s_rt.save.received;
+    }
+}
+
+void FlushReceivedToasts() {
+    auto& pending = s_rt.pendingReceived;
+    if (pending.empty()) {
+        return;
+    }
+    if (pending.size() <= 3) {
+        for (const auto& line : pending) {
+            Toast("Received", line);
+        }
+    } else {
+        Toast("Received", fmt::format("{} items, including {}", pending.size(), pending.back()));
+    }
+    pending.clear();
+}
+
+void CheckGoalAndDeath() {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (link == nullptr) {
+        return;
+    }
+
+    // DeathLink: entering the death state (a fairy revival never gets there)
+    const bool dead = link->mProcID == daAlink_c::PROC_DEAD;
+    if (dead && !s_rt.wasDead && s_rt.save.deathLink && s_client) {
+        const bool causedByDeathLink = s_rt.deathLinkReceivedAt >= 0 && NowMs() - s_rt.deathLinkReceivedAt < 15000;
+        if (!causedByDeathLink) {
+            s_client->SendDeathLink(s_rt.save.connection.slot + " fell in Hyrule.", UnixSeconds());
+        }
+        s_rt.deathLinkReceivedAt = -1;
+    }
+    s_rt.wasDead = dead;
+
+    // Goal: the final blow on Ganondorf (daB_GND enters its end action)
+    if (!s_rt.save.goal) {
+        const char* stage = dComIfGp_getStartStageName();
+        if (stage != nullptr && (std::strcmp(stage, "D_MN09B") == 0 || std::strcmp(stage, "D_MN09C") == 0)) {
+            if (auto* ganondorf = static_cast<b_gnd_class*>(fopAcM_SearchByName(fpcNm_B_GND_e));
+                ganondorf != nullptr && ganondorf->mActionMode == 22 /* ACTION_END */)
+            {
+                s_rt.save.goal = true;
+                mods::log::info("Archipelago: Ganondorf defeated, goal complete");
+                AddLog("Goal complete!");
+                Toast("Archipelago", "Goal complete!", nullptr, 8000);
+            }
+        }
+    }
+    if (s_rt.save.goal && !s_rt.goalSent && s_client) {
+        s_client->SetGoalReached();
+        s_rt.goalSent = true;
+    }
+}
+
+void TickNewSave() {
+    if (s_newPhase != NewSavePhase::Generating || !s_job || !s_job->done) {
+        return;
+    }
+    if (s_job->thread.joinable()) {
+        s_job->thread.join();
+    }
+    if (!s_job->error.empty() || s_job->hash.empty()) {
+        s_newPhase = NewSavePhase::Error;
+        s_newMessage = "Could not generate the seed: " + (s_job->error.empty() ? "unknown error" : s_job->error);
+        mods::log::error("Archipelago: {}", s_newMessage);
+        if (s_client) {
+            s_client->Disconnect();
+        }
+    } else {
+        s_pendingHash = s_job->hash;
+        s_newPhase = NewSavePhase::Ready;
+        s_newMessage = "Ready! Seed " + s_pendingHash + " for " + s_newForm.slot + ".";
+        svc_mng.config->set_string(mod_ctx, s_cfgServer, s_newForm.server.c_str());
+        svc_mng.config->set_string(mod_ctx, s_cfgSlot, s_newForm.slot.c_str());
+    }
+    s_job.reset();
+}
+
+void ResetRuntime() {
+    s_rt = Runtime{};
+}
+
+bool LoadSlot(const std::string& seed) {
+    const auto text = ReadText(SlotDataPath(seed));
+    if (!text) {
+        mods::log::error("Archipelago: missing slot data for seed {}", seed);
+        return false;
+    }
+    try {
+        std::string error;
+        s_rt.slot = SlotData::Parse(json::parse(*text), error);
+        if (!s_rt.slot) {
+            mods::log::error("Archipelago: {}", error);
+            return false;
+        }
+    } catch (const std::exception& e) {
+        mods::log::error("Archipelago: bad slot data for seed {}: {}", seed, e.what());
+        return false;
+    }
+    BuildLocationIndex();
+    return true;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Public
+
+ModResult Initialize() {
+    RegisterConfig();
+    return MOD_OK;
+}
+
+ModResult OnActivated() {
+    RegisterMessageOverrides();
+    return ui::RegisterMenuTab();
+}
+
+void OnDeactivated() {
+    CancelNewSave();
+    if (s_client) {
+        s_client->Disconnect();
+    }
+    s_client.reset();
+    s_messageOverrides.clear();
+    ui::UnregisterMenuTab();
+    ResetRuntime();
+}
+
+ModResult OnNewSaveSelect(GameModeNewSaveState* state) {
+    CancelNewSave();
+    s_newForm.server = GetConfigString(s_cfgServer);
+    if (s_newForm.server.empty()) {
+        s_newForm.server = "archipelago.gg:38281";
+    }
+    s_newForm.slot = GetConfigString(s_cfgSlot);
+    s_newForm.password.clear();
+    s_newPhase = NewSavePhase::Idle;
+    s_newMessage.clear();
+    s_pendingHash.clear();
+    return ui::OpenNewSaveWindow(state);
+}
+
+const std::string& PendingSeedHash() {
+    return s_pendingHash;
+}
+
+void StartNewSaveConnection() {
+    if (s_newPhase == NewSavePhase::Connecting || s_newPhase == NewSavePhase::Generating) {
+        return;
+    }
+    if (s_newForm.server.empty() || s_newForm.slot.empty()) {
+        s_newPhase = NewSavePhase::Error;
+        s_newMessage = "Enter the server address and your slot name.";
+        return;
+    }
+    // A new save is not loaded yet; anything from a previous save stops here
+    ResetRuntime();
+    s_pendingHash.clear();
+    s_newSlot.reset();
+    s_newPhase = NewSavePhase::Connecting;
+    s_newMessage = "Connecting to " + s_newForm.server + "...";
+    EnsureClient().Connect(MakeConfig(s_newForm, false, false), NowMs());
+}
+
+void CancelNewSave() {
+    if (s_job) {
+        if (s_job->thread.joinable()) {
+            s_job->thread.join();
+        }
+        s_job.reset();
+    }
+    if (s_newPhase == NewSavePhase::Connecting || s_newPhase == NewSavePhase::Generating) {
+        if (s_client) {
+            s_client->Disconnect();
+        }
+    }
+    s_newPhase = NewSavePhase::Idle;
+}
+
+ConnectionForm& NewSaveForm() {
+    return s_newForm;
+}
+
+NewSavePhase GetNewSavePhase() {
+    return s_newPhase;
+}
+
+const std::string& NewSaveMessage() {
+    return s_newMessage;
+}
+
+ModResult OnNewSave() {
+    if (!s_newSlot || s_pendingHash.empty()) {
+        return MOD_ERROR;
+    }
+    ResetRuntime();
+    s_rt.active = true;
+    s_rt.save.connection = s_newForm;
+    s_rt.save.seed = s_newSlot->seed;
+    s_rt.save.seedHash = s_pendingHash;
+    s_rt.save.deathLink = s_newSlot->deathLink;
+    s_rt.slot = std::move(s_newSlot);
+    s_newSlot.reset();
+    BuildLocationIndex();
+    WriteSaveBlob();
+
+    // Keep the connection from the new-save screen, now retrying if it drops
+    if (s_client && s_client->IsConnected()) {
+        s_client->SetAutoReconnect(true);
+        s_client->SetDeathLink(s_rt.save.deathLink);
+    } else {
+        EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+    }
+    s_newPhase = NewSavePhase::Idle;
+    s_pendingHash.clear();
+    mods::log::info("Archipelago: new save for {} ({} locations)", s_rt.save.connection.slot,
+        s_rt.locations.size());
+    return MOD_OK;
+}
+
+std::string PrepareSeed(const std::string& seedHash) {
+    auto state = ReadSaveBlob();
+    if (!state || state->seed.empty()) {
+        return seedHash;
+    }
+    RandomizerContext probe;
+    const auto error = probe.LoadFromHash(seedHash);
+    if (!error && !probe.mHash.empty()) {
+        return seedHash;  // seed files are fine
+    }
+    // Missing or obsolete (written by an older version of the mod): generate again
+    const auto text = ReadText(SlotDataPath(state->seed));
+    if (!text) {
+        mods::log::error("Archipelago: seed {} is missing and there is no slot data to rebuild it", seedHash);
+        return seedHash;
+    }
+    try {
+        std::string parseError;
+        auto slot = SlotData::Parse(json::parse(*text), parseError);
+        if (!slot) {
+            mods::log::error("Archipelago: {}", parseError);
+            return seedHash;
+        }
+        Randomizer rando{paths::GetRandomizerPath()};
+        if (auto generateError = GenerateWorlds(rando, SeedWorkDir(state->seed), *slot)) {
+            mods::log::error("Archipelago: could not rebuild seed {}: {}", seedHash, *generateError);
+            return seedHash;
+        }
+        RandomizerContext context = WriteSeedData(rando.GetWorld());
+        context.mHash = rando.GetConfig().GetHash();
+        if (auto writeError = context.WriteToFile()) {
+            mods::log::error("Archipelago: could not write seed {}: {}", context.mHash, *writeError);
+            return seedHash;
+        }
+        mods::log::info("Archipelago: rebuilt seed {} from slot data (save had {})", context.mHash, seedHash);
+        return context.mHash;
+    } catch (const std::exception& e) {
+        mods::log::error("Archipelago: could not rebuild seed {}: {}", seedHash, e.what());
+    }
+    return seedHash;
+}
+
+ModResult OnSaveLoaded() {
+    if (s_job) {
+        CancelNewSave();
+    }
+    ResetRuntime();
+    auto state = ReadSaveBlob();
+    if (!state) {
+        mods::log::error("Archipelago: this save has no Archipelago state");
+        if (s_client) {
+            s_client->Disconnect();
+        }
+        return MOD_OK;
+    }
+    s_rt.save = *state;
+    s_rt.active = true;
+    if (!LoadSlot(s_rt.save.seed)) {
+        Toast("Archipelago", "The data for this save's seed is missing. Locations will not be sent.", "warning",
+            10000);
+    }
+    s_rt.save.seedHash = randomizer_GetContext().mHash;
+    s_rt.goalSent = false;
+    // Locations already done in this save are found by the first scan in game and sent then
+    if (!s_rt.save.connection.server.empty() && !s_rt.save.connection.slot.empty()) {
+        EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+    }
+    return MOD_OK;
+}
+
+void OnSaveWritten() {
+    WriteSaveBlob();
+}
+
+void OnGameReset() {
+    CancelNewSave();
+    if (s_client) {
+        s_client->Disconnect();
+    }
+    ResetRuntime();
+}
+
+void Tick() {
+    transport::Pump();
+    if (s_client) {
+        s_client->Tick(NowMs());
+    }
+    TickNewSave();
+    if (!s_rt.active || !randomizer_IsActive() || playerIsOnTitleScreen() ||
+        daAlink_getAlinkActorClass() == nullptr || dComIfGp_getStageStagInfo() == nullptr)
+    {
+        return;  // only while playing: flags are read from the loaded stage and save
+    }
+    if (++s_rt.scanTimer >= kScanInterval) {
+        s_rt.scanTimer = 0;
+        MarkChecked(ScanFlags());
+    }
+    ProcessReceivedItems();
+    CheckGoalAndDeath();
+    FlushReceivedToasts();
+}
+
+bool ResolveCheck(const ItemCheckInfo* info, ItemCheckResolution* outResult) {
+    if (info == nullptr || info->name == nullptr || std::strncmp(info->name, kReceivePrefix,
+                                                         std::strlen(kReceivePrefix)) != 0)
+    {
+        return false;
+    }
+    outResult->item = static_cast<uint8_t>(verifyProgressiveItem(info->vanilla_item));
+    return true;
+}
+
+void NoteResolution(const char* checkName, uint8_t item) {
+    if (item != kArchipelagoItemId || !s_rt.active) {
+        return;
+    }
+    if (const auto index = LocationForCheck(checkName)) {
+        s_rt.lastForeign = s_rt.locations[*index].ap;
+    }
+}
+
+void ObserveGive(const ItemGiveInfo* info) {
+    if (info == nullptr || info->check_name == nullptr || !s_rt.active) {
+        return;
+    }
+    const char* name = info->check_name;
+    const size_t prefixLength = std::strlen(kReceivePrefix);
+    if (std::strncmp(name, kReceivePrefix, prefixLength) == 0) {
+        const size_t index = std::strtoull(name + prefixLength, nullptr, 10);
+        s_rt.doneItems.insert(index);
+        while (s_rt.doneItems.erase(s_rt.save.received) != 0) {
+            ++s_rt.save.received;
+        }
+        if (s_client && index < s_client->Items().size()) {
+            const auto& item = s_client->Items()[index];
+            const int64_t local = item.item - (s_rt.slot ? s_rt.slot->itemIdBase : 0);
+            std::string itemName = s_client->ItemName(item.item, s_client->Slot());
+            if (const auto it = ItemNames().find(static_cast<uint8_t>(local)); it != ItemNames().end()) {
+                itemName = it->second;
+            }
+            const std::string from = item.location == -2 ? std::string{"your starting inventory"} :
+                                                           s_client->PlayerName(item.player);
+            s_rt.pendingReceived.push_back(Colored(itemName, ItemColor(item.flags)) + " from " +
+                                           Colored(from, "#fafad2"));
+            AddLog("Received " + s_rt.pendingReceived.back());
+        }
+        return;
+    }
+    if (const auto location = LocationForCheck(name)) {
+        if (const auto* ap = s_rt.locations[*location].ap) {
+            MarkChecked({ap->id});
+        }
+    }
+}
+
+ConnectionForm& SaveForm() {
+    return s_rt.save.connection;
+}
+
+bool SaveActive() {
+    return s_rt.active;
+}
+
+void ConnectSave() {
+    if (!s_rt.active || s_rt.save.connection.server.empty() || s_rt.save.connection.slot.empty()) {
+        return;
+    }
+    EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+    if (!s_rt.checked.empty()) {
+        s_client->CheckLocations({s_rt.checked.begin(), s_rt.checked.end()});
+    }
+    s_rt.goalSent = false;
+}
+
+void DisconnectSave() {
+    if (s_client) {
+        s_client->Disconnect();
+    }
+}
+
+ApClient* Client() {
+    return s_client.get();
+}
+
+std::string StatusText() {
+    if (!s_client) {
+        return "Not connected";
+    }
+    const ApState state = s_client->State();
+    std::string text = ApStateName(state);
+    if (state == ApState::Connected) {
+        text += " to " + s_client->Detail() + " as " + s_client->Config().slotName;
+    } else if (!s_client->Detail().empty() && state != ApState::Idle) {
+        text += ": " + s_client->Detail();
+    }
+    return text;
+}
+
+const std::deque<std::string>& MessageLog() {
+    return s_log;
+}
+
+uint64_t MessageLogVersion() {
+    return s_logVersion;
+}
+
+void Say(const std::string& text) {
+    if (s_client && !text.empty()) {
+        s_client->Say(text);
+    }
+}
+
+bool DeathLinkEnabled() {
+    return s_rt.save.deathLink;
+}
+
+void SetDeathLinkEnabled(bool enabled) {
+    s_rt.save.deathLink = enabled;
+    if (s_client) {
+        s_client->SetDeathLink(enabled);
+    }
+}
+
+bool ToastsEnabled() {
+    return NotificationsOn();
+}
+
+void SetToastsEnabled(bool enabled) {
+    if (s_cfgToasts != 0) {
+        svc_mng.config->set_bool(mod_ctx, s_cfgToasts, enabled);
+    }
+}
+
+size_t LocationCount() {
+    return s_rt.locations.size();
+}
+
+size_t CheckedLocationCount() {
+    if (s_client && s_client->IsConnected()) {
+        std::set<int64_t> all = s_client->ServerCheckedLocations();
+        all.insert(s_rt.checked.begin(), s_rt.checked.end());
+        return all.size();
+    }
+    return s_rt.checked.size();
+}
+
+size_t ReceivedItemCount() {
+    return s_rt.save.received;
+}
+
+std::string EscapeRml(const std::string& text) {
+    std::string out;
+    out.reserve(text.size());
+    for (const char c : text) {
+        switch (c) {
+        case '&':
+            out += "&amp;";
+            break;
+        case '<':
+            out += "&lt;";
+            break;
+        case '>':
+            out += "&gt;";
+            break;
+        case '"':
+            out += "&quot;";
+            break;
+        default:
+            out += c;
+        }
+    }
+    return out;
+}
+
+}  // namespace randomizer::archi::game

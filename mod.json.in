@@ -1,7 +1,7 @@
 {
-  "id": "dev.twilitrealm.randomizer",
-  "name": "Dusklight Randomizer",
-  "version": "@RANDOMIZER_VERSION@",
-  "author": "Twilit Realm",
-  "description": "Shuffles items and equipment all over the game, giving you countless new ways to enjoy Dusklight."
+  "id": "io.github.pegzzzz.tp_archipelago",
+  "name": "Twilight Princess Archipelago",
+  "version": "@ARCHIPELAGO_MOD_VERSION@",
+  "author": "Elliot, built on the Dusklight Randomizer by Twilit Realm",
+  "description": "Play Dusklight as part of an Archipelago multiworld: your items are spread across other players' games and theirs across yours. Built on the Dusklight Randomizer, as its own game mode."
 }

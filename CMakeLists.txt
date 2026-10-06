@@ -115,6 +115,12 @@ set(RANDOMIZER_SOURCES
         src/ui/rando_config.cpp
         src/ui/ui.cpp
         src/ui/tracker.cpp
+        src/archipelago/ap_client.cpp
+        src/archipelago/ap_game.cpp
+        src/archipelago/ap_seed.cpp
+        src/archipelago/ap_transport.cpp
+        src/archipelago/ap_ui.cpp
+        src/archipelago/ws_codec.cpp
 )
 
 # Embed the generator's YAML data into the mod library. Paths are relative to this
@@ -135,6 +141,8 @@ endforeach ()
 
 # Versioning
 set(RANDOMIZER_VERSION "1.0.6")
+# Version of the Archipelago mod (mod.json) and of the APWorld it goes with
+set(ARCHIPELAGO_MOD_VERSION "0.1.0")
 find_package(Git QUIET)
 if(GIT_FOUND)
     execute_process(
@@ -177,7 +185,7 @@ configure_file(
         NEWLINE_STYLE LF
 )
 
-add_mod(randomizer
+add_mod(tp_archipelago
     FEATURES game fmt
     SOURCES  src/mod.cpp ${RANDOMIZER_GENERATOR_SOURCES} ${RANDOMIZER_SOURCES}
     MOD_JSON mod.json
@@ -185,11 +193,12 @@ add_mod(randomizer
     BUNDLE
 )
 
-target_link_libraries(randomizer PRIVATE yaml-cpp::yaml-cpp base64pp randomizer_embeds)
+target_link_libraries(tp_archipelago PRIVATE yaml-cpp::yaml-cpp base64pp randomizer_embeds nlohmann_json::nlohmann_json)
 
 string(LENGTH "${CMAKE_CURRENT_SOURCE_DIR}/" RANDOMIZER_SOURCE_PATH_SIZE)
-target_compile_definitions(randomizer PRIVATE
+target_compile_definitions(tp_archipelago PRIVATE
         FULL_RANDOMIZER_VERSION="${FULL_RANDOMIZER_VERSION}"
+        ARCHIPELAGO_MOD_VERSION="${ARCHIPELAGO_MOD_VERSION}"
         RANDO_DATA_PATH="generator/data/"
         SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE}
 )
@@ -248,3 +257,12 @@ target_compile_definitions(ap_tool PRIVATE
         RANDO_DATA_PATH="generator/data/"
         SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE}
         RANDOMIZER_ONLY)
+
+# Archipelago: the mod's network client on POSIX sockets, driven by apworld/tools/client_test.py
+if (UNIX)
+    add_executable(ap_client_driver EXCLUDE_FROM_ALL
+            ${CMAKE_CURRENT_SOURCE_DIR}/apworld/tools/client/ap_client_driver.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ap_client.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ws_codec.cpp)
+    target_link_libraries(ap_client_driver PRIVATE nlohmann_json::nlohmann_json)
+endif ()

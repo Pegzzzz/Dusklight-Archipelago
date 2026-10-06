@@ -5,6 +5,7 @@
 build/
 dusklight/
 
-mod.json__pycache__/
+mod.json
+__pycache__/
 *.pyc
 /apworld/build/

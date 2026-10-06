@@ -36,11 +36,8 @@ ModResult initialize() {
         return res;
     }
 
-    res = buildMenuTab();
-    if (res != MOD_OK) {
-        mods::log::error("failed to initialize randomizer menu tab!");
-        return res;
-    }
+    // The Archipelago game mode has its own menu tab (archipelago/ap_ui.cpp) instead of the
+    // randomizer's seed settings.
 
     uiRunning = true;
     progressBarUpdateThread = std::thread(update_seed_gen_progress_bar);
@@ -56,7 +53,6 @@ ModResult shutdown() {
     if (progressBarUpdateThread.joinable()) {
         progressBarUpdateThread.join();
     }
-    removeMenuTab();
     session::svc_mng.ui->unregister_styles(mod_ctx, styleHandle);
     return MOD_OK;
 }

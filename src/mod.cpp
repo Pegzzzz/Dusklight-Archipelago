@@ -1,5 +1,7 @@
 #include "mods/service.hpp"
 #include "mods/svc/log.h"
+#include "mods/svc/net.h"
+#include "mods/svc/websocket.h"
 
 #include "item.hpp"
 #include "session.hpp"
@@ -19,6 +21,8 @@ IMPORT_SERVICE(MessageService, svc_message);
 IMPORT_SERVICE(GameModeService, svc_game_mode);
 IMPORT_SERVICE(TextureService, svc_texture);
 IMPORT_SERVICE(FileService, svc_file);
+IMPORT_SERVICE(WebSocketService, svc_websocket);
+IMPORT_SERVICE(NetService, svc_net);
 
 extern "C" {
 
@@ -44,7 +48,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
         return mods::set_error(error, result, "failed to initialize session");
     }
 
-    svc_log->info(mod_ctx, "randomizer " FULL_RANDOMIZER_VERSION " initialized");
+    svc_log->info(mod_ctx, "Twilight Princess Archipelago " ARCHIPELAGO_MOD_VERSION " (randomizer "
+        FULL_RANDOMIZER_VERSION ") initialized");
     return MOD_OK;
 }
 
@@ -55,7 +60,7 @@ MOD_EXPORT ModResult mod_update(ModError*) {
 
 MOD_EXPORT ModResult mod_shutdown(ModError*) {
     randomizer::session::shutdown();
-    svc_log->info(mod_ctx, "randomizer unloaded");
+    svc_log->info(mod_ctx, "Twilight Princess Archipelago unloaded");
     return MOD_OK;
 }
 }
