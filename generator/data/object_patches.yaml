@@ -2345,6 +2345,67 @@ F_SP116:
       layers:
         - 0xFF
 
+    # Add scene change and cam areas to twilight layers
+    - action: add
+      name: scnChg
+      parameters: 0xFF31000C
+      position:
+        x: -0.537171006202698
+        y: 960.926696777344
+        z: 4435.2109375
+      angle:
+        x: 0x0FFF
+        y: 0x0000
+        z: 0x0FFF
+      set id: 0xFFFF
+      scale:
+        x: 50
+        y: 50
+        z: 50
+      layers:
+        - 13
+        - 14
+
+    - action: add
+      name: CamArea
+      parameters: 0x0403FF1F
+      position:
+        x: 8.53365802764893
+        y: 998.896606445313
+        z: 3361.44775390625
+      angle:
+        x: 0x0000
+        y: 0x0000
+        z: 0x00FF
+      set id: 0xFFFF
+      scale:
+        x: 20
+        y: 5
+        z: 10
+      layers:
+        - 13
+        - 14
+
+    - action: add
+      name: CamArea
+      parameters: 0x0603E000
+      position:
+        x: -23.2665386199951
+        y: 986.443176269531
+        z: 4416.48193359375
+      angle:
+        x: 0x0000
+        y: 0x0000
+        z: 0x00FF
+      set id: 0xFFFF
+      scale:
+        x: 10
+        y: 10
+        z: 15
+      layers:
+        - 13
+        - 14
+
   # Room 1 - North Castle Town
   1:
     # Golden Wolf in North Castle Town

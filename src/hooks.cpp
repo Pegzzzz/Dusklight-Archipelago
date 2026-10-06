@@ -1461,6 +1461,10 @@ HookAction hookPreGetLayerNo(ModContext*, void* args, void* retval, void*) {
         }
     }
 
+    // TEMP FIX: Crashes in base dusklight when layer forced to 5 in lanayru twilight north castle town
+    if (layer == 5 && !strcmp(i_stageName, "F_SP116") && i_roomNo == 0 && !dComIfGs_isEventBit(CLEARED_LANAYRU_TWILIGHT)) {
+        layer = 14;
+    }
     *static_cast<int*>(retval) = layer;
     return HOOK_SKIP_ORIGINAL;
 }
