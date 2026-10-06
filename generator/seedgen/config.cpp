@@ -236,8 +236,10 @@ namespace randomizer::seedgen::config
             }
             else if (preferenceName == PLANDOMIZER_PATH)
             {
+                // YAML text is UTF-8 (std::string to path would use the ANSI code page on Windows)
                 const auto& plandomizerPath = preferenceNode.second.as<std::string>();
-                this->_plandomizerPath = plandomizerPath;
+                this->_plandomizerPath = std::filesystem::path(std::u8string(
+                    reinterpret_cast<const char8_t*>(plandomizerPath.data()), plandomizerPath.size()));
             }
         }
 
@@ -347,7 +349,9 @@ namespace randomizer::seedgen::config
         YAML::Node out;
         for (auto& settings : this->_settingsList)
         {
-            out[PLANDOMIZER_PATH] = this->_plandomizerPath.generic_string();
+            const auto plandomizerPath = this->_plandomizerPath.generic_u8string();
+            out[PLANDOMIZER_PATH] = std::string(reinterpret_cast<const char*>(plandomizerPath.data()),
+                                                plandomizerPath.size());
             for (auto& [settingName, setting] : settings.GetMap())
             {
                 if (setting.GetInfo()->GetType() == settings::Type::PREFERENCE)

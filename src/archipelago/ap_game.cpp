@@ -28,9 +28,12 @@
 #include <fmt/format.h>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <random>
 #include <set>
@@ -939,7 +942,7 @@ std::string PrepareSeed(const std::string& seedHash) {
     try {
         std::error_code ec;
         if (std::filesystem::exists(seedFile, ec) &&
-            YAML::LoadFile(seedFile.string())["formatVersion"].as<u32>(0) == RandomizerContext::FORMAT_VERSION)
+            LoadYAML(seedFile)["formatVersion"].as<u32>(0) == RandomizerContext::FORMAT_VERSION)
         {
             return seedHash;  // seed files are fine
         }

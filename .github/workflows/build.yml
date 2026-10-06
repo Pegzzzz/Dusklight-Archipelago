@@ -8,6 +8,8 @@ on:
 
 env:
   SYMGEN_VERSION: v1.3.4
+  # Archipelago release the APWorld and the client are tested against
+  ARCHIPELAGO_VERSION: "0.6.8"
 
 jobs:
   build:
@@ -92,10 +94,100 @@ jobs:
           path: build/mods/*.dusk
           if-no-files-found: error
 
+  apworld:
+    name: APWorld
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check out Archipelago
+        uses: actions/checkout@v7
+        with:
+          repository: ArchipelagoMW/Archipelago
+          ref: ${{env.ARCHIPELAGO_VERSION}}
+          path: archipelago
+
+      - name: Install Archipelago
+        run: |
+          tools/ci/prepare_archipelago.sh archipelago .
+          python -m pip install -r archipelago/requirements.txt pytest
+
+      - name: Test the world
+        working-directory: archipelago
+        run: python -m pytest -q worlds/tp_dusklight/test test/general
+
+      - name: Package
+        run: python apworld/tools/package_apworld.py -o dist/tp_dusklight.apworld
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: apworld
+          path: dist/tp_dusklight.apworld
+          if-no-files-found: error
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check out Archipelago
+        uses: actions/checkout@v7
+        with:
+          repository: ArchipelagoMW/Archipelago
+          ref: ${{env.ARCHIPELAGO_VERSION}}
+          path: archipelago
+
+      - name: Install Archipelago
+        run: |
+          tools/ci/prepare_archipelago.sh archipelago .
+          python -m pip install -r archipelago/requirements.txt
+
+      - name: Read pinned Dusklight version
+        id: dusklight
+        shell: bash
+        run: echo "version=$(sed -n 's/.*set(DUSKLIGHT_VERSION "\([^"]*\)").*/\1/p' CMakeLists.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Dusklight sources
+        uses: actions/cache@v6
+        with:
+          path: dusklight
+          key: dusklight-${{runner.os}}-${{steps.dusklight.outputs.version}}
+
+      - name: Build test tools
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --parallel --target ap_parity_harness ap_tool ap_seeddata_test ap_client_driver
+
+      - name: Logic parity (Python port vs. C++ generator)
+        env:
+          PYTHONPATH: archipelago
+        run: python apworld/tools/parity_test.py --harness build/ap_parity_harness --samples 100 --random-presets 40
+
+      - name: Slot data to in-game seed
+        working-directory: archipelago
+        run: >-
+          python ../apworld/tools/seed_test.py --ap-tool ../build/ap_tool
+          --seeddata-test ../build/ap_seeddata_test --count 8
+
+      - name: Network client against MultiServer
+        run: python apworld/tools/client_test.py archipelago build/ap_client_driver
+
   combine:
     name: Combine bundles
-    needs: build
+    needs: [build, apworld, integration]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -104,6 +196,12 @@ jobs:
         with:
           pattern: mod-*
           path: dist
+
+      - name: Download APWorld
+        uses: actions/download-artifact@v8
+        with:
+          name: apworld
+          path: dist/apworld
 
       - name: Install symgen
         run: |
@@ -115,17 +213,20 @@ jobs:
         run: |
           name=$(basename dist/mod-linux-x86_64/*.dusk)
           python3 tools/merge_mod.py -o "combined/$name" --symgen ./symgen \
-            dist/*/*.dusk
+            dist/mod-*/*.dusk
+          cp dist/apworld/tp_dusklight.apworld combined/
 
       - name: Upload combined bundle
         uses: actions/upload-artifact@v7
         with:
-          name: mod-combined
-          path: combined/*.dusk
+          name: release
+          path: |
+            combined/*.dusk
+            combined/*.apworld
           if-no-files-found: error
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{github.token}}
-        run: gh release create "$GITHUB_REF_NAME" combined/*.dusk --verify-tag --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" combined/*.dusk combined/*.apworld --verify-tag --generate-notes

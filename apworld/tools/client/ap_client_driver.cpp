@@ -40,6 +40,10 @@ void Emit(json event) {
     std::cout << event.dump(-1, ' ', false, json::error_handler_t::replace) << std::endl;
 }
 
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
 class PosixWsTransport final : public Transport {
 public:
     static std::unique_ptr<Transport> Create(const std::string& url) {

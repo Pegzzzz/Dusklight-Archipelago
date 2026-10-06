@@ -137,8 +137,10 @@ void WriteGenerationFiles(const std::filesystem::path& dir, const SlotData& slot
     WriteFile(dir / "settings.yaml", std::string(settings.c_str()) + "\n");
 
     YAML::Emitter preferences;
+    const auto plandoText = plandoPath.generic_u8string();  // read back as UTF-8 (config.cpp)
     preferences << YAML::BeginMap << YAML::Key << "Plandomizer Path" << YAML::Value << YAML::DoubleQuoted
-                << plandoPath.generic_string() << YAML::EndMap;
+                << std::string(reinterpret_cast<const char*>(plandoText.data()), plandoText.size())
+                << YAML::EndMap;
     WriteFile(dir / "preferences.yaml", std::string(preferences.c_str()) + "\n");
 
     YAML::Emitter plando;
