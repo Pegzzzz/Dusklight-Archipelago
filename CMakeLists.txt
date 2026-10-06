@@ -213,3 +213,14 @@ target_compile_definitions(randomizer_generator_tests PRIVATE
         SETTINGS_PATH="${CMAKE_BINARY_DIR}/randomizer tests/settings.yaml"
         PREFERENCES_PATH="${CMAKE_BINARY_DIR}/randomizer tests/preferences.yaml"
         RANDOMIZER_ONLY)
+
+# Archipelago: logic parity harness used by apworld/tools/parity_test.py
+add_executable(ap_parity_harness EXCLUDE_FROM_ALL
+        ${CMAKE_CURRENT_SOURCE_DIR}/apworld/tools/parity/parity.cpp ${RANDOMIZER_GENERATOR_SOURCES})
+target_link_libraries(ap_parity_harness PRIVATE
+        dusklight_mod_api yaml-cpp::yaml-cpp base64pp fmt::fmt randomizer_embeds)
+target_compile_definitions(ap_parity_harness PRIVATE
+        FULL_RANDOMIZER_VERSION="${FULL_RANDOMIZER_VERSION}"
+        RANDO_DATA_PATH="generator/data/"
+        SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE}
+        RANDOMIZER_ONLY)
