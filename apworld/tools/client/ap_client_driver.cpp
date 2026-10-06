@@ -281,6 +281,9 @@ int main() {
                 in >> item >> slot;
                 Emit({{"event", "names"}, {"item", client.ItemName(item, slot)},
                     {"player", client.PlayerName(slot)}});
+            } else if (cmd == "count") {
+                Emit({{"event", "count"}, {"items", client.Items().size()},
+                    {"checked", client.ServerCheckedLocations().size()}});
             } else if (cmd == "quit") {
                 return 0;
             }

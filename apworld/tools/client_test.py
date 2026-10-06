@@ -259,6 +259,13 @@ def main() -> int:
             p2.wait(lambda e: e.get("event") == "message" and e["type"] == "Goal", what="goal message")
             print("ok: chat and goal")
 
+            # A new connection never carries over the previous slot's items
+            p2.send(f"connect-once localhost:{port} Nobody secret")
+            p2.send("count")
+            count = p2.wait(lambda e: e.get("event") == "count", what="item count after a new connection")
+            assert count["items"] == 0 and count["checked"] == 0, count
+            print("ok: a new connection starts without the previous slot's items")
+
             # Connection loss and automatic reconnection
             server.terminate()
             server.wait(timeout=10)

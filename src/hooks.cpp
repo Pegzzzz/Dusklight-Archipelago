@@ -9,6 +9,7 @@
 #include "item.hpp"
 #include "item_ids.h"
 #include "verify_item_functions.h"
+#include "archipelago/ap_game.hpp"
 #include "../generator/utility/text.hpp"
 
 #include <mods/svc/hook.hpp>
@@ -76,6 +77,8 @@ DEFINE_HOOK(&dSv_event_c::isEventBit, dSv_event_c__isEventBit);
 DEFINE_HOOK(&dSv_event_c::onEventBit, dSv_event_c__onEventBit);
 
 DEFINE_HOOK(&dComIfGs_isStageSwitch, isStageSwitch);
+
+DEFINE_HOOK(&dComIfGs_setMemoryToCard, dComIfGs_setMemoryToCard_hook);
 
 DEFINE_HOOK(&dSv_memBit_c::isTbox, dSv_memBit_c__isTbox);
 DEFINE_HOOK(&dSv_memBit_c::isSwitch, dSv_memBit_c__isSwitch);
@@ -501,6 +504,13 @@ HookAction hookPreOnEventBit(ModContext*, void* args, void*, void*) {
     default:
         break;
     }
+    return HOOK_CONTINUE;
+}
+
+// Archipelago: the save data is copied for writing now; remember the Archipelago state that goes
+// with it (the write itself completes later)
+HookAction hookPreSetMemoryToCard(ModContext*, void*, void*, void*) {
+    archi::game::OnSaveCaptured();
     return HOOK_CONTINUE;
 }
 
@@ -3521,6 +3531,7 @@ ModResult initialize() {
     ADD_HOOK_PRE(dSv_event_c__onEventBit, hookPreOnEventBit);
 
     ADD_HOOK_PRE(isStageSwitch, hookPreIsStageSwitch);
+    ADD_HOOK_PRE(dComIfGs_setMemoryToCard_hook, hookPreSetMemoryToCard);
 
     ADD_HOOK_PRE(dSv_memBit_c__isTbox, hookPreMembitIsTbox);
     ADD_HOOK_PRE(dSv_memBit_c__isSwitch, hookPreMembitIsSwitch);
@@ -3685,6 +3696,7 @@ ModResult uninstall() {
     mods::hook::uninstall<dSv_event_c__onEventBit>(svc_hook);
 
     mods::hook::uninstall<isStageSwitch>(svc_hook);
+    mods::hook::uninstall<dComIfGs_setMemoryToCard_hook>(svc_hook);
 
     mods::hook::uninstall<dSv_memBit_c__isTbox>(svc_hook);
     mods::hook::uninstall<dSv_memBit_c__isSwitch>(svc_hook);

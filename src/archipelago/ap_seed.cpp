@@ -6,6 +6,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <stdexcept>
 
@@ -24,6 +25,15 @@ std::optional<SlotData> SlotData::Parse(const nlohmann::json& json, std::string&
         slot.apworldVersion = json.value("apworld_version", "");
         slot.randomizerData = json.value("randomizer_data", "");
         slot.seed = json.at("seed").get<std::string>();
+        // Used in file names: only what the APWorld produces ("AP" + hex digits)
+        const bool seedOk = !slot.seed.empty() && slot.seed.size() <= 64 &&
+                            std::ranges::all_of(slot.seed, [](unsigned char c) {
+                                return std::isalnum(c) || c == '-' || c == '_';
+                            });
+        if (!seedOk) {
+            error = "The Archipelago slot data has an invalid seed name.";
+            return std::nullopt;
+        }
         slot.itemIdBase = json.at("item_id_base").get<int64_t>();
         slot.deathLink = json.value("death_link", false);
         for (const auto& [name, value] : json.at("settings").items()) {

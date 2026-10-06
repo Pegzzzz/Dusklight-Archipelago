@@ -250,6 +250,9 @@ void Pump() {
         while (mods::ws::poll(event)) {
             if (const auto it = s_wsTransports.find(event.handle); it != s_wsTransports.end()) {
                 it->second->OnEvent(event);
+            } else if (event.type == WEBSOCKET_EVENT_OPEN) {
+                // A connection that was dropped while still connecting: don't leave it open
+                svc_websocket->close(mod_ctx, event.handle, 1000, "unused");
             }
         }
     }
@@ -261,6 +264,8 @@ void Pump() {
             }
             if (const auto it = s_netTransports.find(event.handle); it != s_netTransports.end()) {
                 it->second->OnEvent(event);
+            } else if (event.type == NET_EVENT_CONNECTED) {
+                svc_net->close(mod_ctx, event.handle);
             }
         }
     }

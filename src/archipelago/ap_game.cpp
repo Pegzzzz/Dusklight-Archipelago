@@ -78,8 +78,10 @@ std::filesystem::path ArchipelagoDir() {
     return paths::GetRandomizerPath() / "archipelago";
 }
 
+std::string SafeFileName(const std::string& text);
+
 std::filesystem::path SeedWorkDir(const std::string& seed) {
-    return ArchipelagoDir() / "seeds" / seed;
+    return ArchipelagoDir() / "seeds" / SafeFileName(seed.empty() ? std::string{"unknown"} : seed);
 }
 
 std::filesystem::path SlotDataPath(const std::string& seed) {
@@ -200,7 +202,7 @@ struct Runtime {
     std::set<size_t> doneItems;  // completed gives not yet contiguous with save.received
     int scanTimer = 0;
     bool wasDead = false;
-    int64_t deathLinkReceivedAt = -1;
+    bool deathLinkKill = false;  // Link's life was set to 0 by a DeathLink; his death is not sent back
     bool goalSent = false;
     // The last foreign item a check resolved to, for the get-item text
     const ApLocation* lastForeign = nullptr;
@@ -211,6 +213,11 @@ struct Runtime {
 Runtime s_rt;
 
 std::unique_ptr<ApClient> s_client;
+// The slot seed the client's current item list was checked against (see OnConnected): items are
+// only given to a save of that seed.
+std::string s_verifiedSeed;
+// The save state as it was when the game copied its data for writing (see OnSaveCaptured)
+std::optional<std::string> s_capturedState;
 std::deque<std::string> s_log;
 uint64_t s_logVersion = 0;
 std::vector<mods::flow::MessageOverride> s_messageOverrides;
@@ -294,16 +301,25 @@ std::string MessageRml(const ApMessage& message) {
 // ---------------------------------------------------------------------------------------------
 // Location checks
 
+// The save's own flags only: the tracker's temporary flags (tracker_is*) can outlive a reload
+bool IsStageItem(int stage, int flag) {
+    if (dComIfGp_getStageStagInfo() && stage == dStage_stagInfo_GetSaveTbl(dComIfGp_getStageStagInfo())) {
+        return dComIfGs_isItem(flag, -1);
+    }
+    // isItem on the save table: the bit number without the MEMORY_ITEM offset (as tools.cpp)
+    return g_dComIfG_gameInfo.info.getSavedata().getSave(stage).getBit().isItem(flag - 0x80);
+}
+
 bool IsObtained(const TrackedLocation& location) {
     switch (location.kind) {
     case FlagKind::Tbox:
         return dComIfGs_isStageTbox(location.stage, location.flag);
     case FlagKind::Switch:
-        return tracker_isStageSwitch(location.stage, location.flag);
+        return dComIfGs_isStageSwitch(location.stage, location.flag);
     case FlagKind::Item:
-        return tracker_isStageItem(location.stage, location.flag);
+        return IsStageItem(location.stage, location.flag);
     case FlagKind::Event:
-        return tracker_isEventBit(location.flag);
+        return dComIfGs_isEventBit(location.flag);
     case FlagKind::None:
         break;
     }
@@ -552,6 +568,11 @@ ApClientConfig MakeConfig(const ConnectionForm& form, bool autoReconnect, bool d
     return config;
 }
 
+void ConnectClient(const ApClientConfig& config) {
+    s_verifiedSeed.clear();
+    EnsureClient().Connect(config, NowMs());
+}
+
 void Listener::OnStateChanged(ApState state, const std::string& detail) {
     if (s_newPhase == NewSavePhase::Connecting && state == ApState::Failed) {
         s_newPhase = NewSavePhase::Error;
@@ -585,6 +606,7 @@ void Listener::OnConnected(const json& slotData) {
         }
         s_newSlot = std::move(slot);
         s_newSlotJson = slotData.dump();
+        s_verifiedSeed = s_newSlot->seed;
         s_newPhase = NewSavePhase::Generating;
         s_newMessage = "Connected. Generating the seed...";
 
@@ -626,7 +648,8 @@ void Listener::OnConnected(const json& slotData) {
     }
     // Make sure this is the room the save belongs to
     const std::string seed = slotData.value("seed", "");
-    if (seed != s_rt.save.seed) {
+    if (seed != s_rt.save.seed || seed.empty()) {
+        s_verifiedSeed.clear();
         const std::string message = "This room is not the one this save was created for (seed " + seed +
                                     ", save " + s_rt.save.seed + "). Disconnected.";
         mods::log::error("Archipelago: {}", message);
@@ -635,6 +658,7 @@ void Listener::OnConnected(const json& slotData) {
         Toast("Archipelago", EscapeRml(message), "warning", 10000);
         return;
     }
+    s_verifiedSeed = seed;
     if (s_rt.save.goal) {
         s_client->SetGoalReached();
     }
@@ -685,7 +709,7 @@ void Listener::OnDeathLink(const std::string& source, const std::string& cause) 
         return;
     }
     Toast("DeathLink", EscapeRml(text), "warning");
-    s_rt.deathLinkReceivedAt = NowMs();
+    s_rt.deathLinkKill = true;
     dComIfGs_setLife(0);
 }
 
@@ -693,12 +717,17 @@ void Listener::OnDeathLink(const std::string& source, const std::string& cause) 
 // Per-frame work
 
 void ProcessReceivedItems() {
-    if (!s_client || !s_rt.active || !randomizer_IsActive() || randomizer_GetContext().mCreatingSave) {
+    if (!s_client || !s_rt.active || !s_rt.slot || !randomizer_IsActive() ||
+        randomizer_GetContext().mCreatingSave)
+    {
         return;
+    }
+    if (s_verifiedSeed.empty() || s_verifiedSeed != s_rt.save.seed) {
+        return;  // the item list is not (yet) known to be this save's
     }
     const auto& items = s_client->Items();
     s_rt.queuedItems = std::max(s_rt.queuedItems, s_rt.save.received);
-    const int64_t itemBase = s_rt.slot ? s_rt.slot->itemIdBase : 0;
+    const int64_t itemBase = s_rt.slot->itemIdBase;
     while (s_rt.queuedItems < items.size()) {
         const size_t index = s_rt.queuedItems++;
         const auto& item = items[index];
@@ -740,12 +769,14 @@ void CheckGoalAndDeath() {
 
     // DeathLink: entering the death state (a fairy revival never gets there)
     const bool dead = link->mProcID == daAlink_c::PROC_DEAD;
-    if (dead && !s_rt.wasDead && s_rt.save.deathLink && s_client) {
-        const bool causedByDeathLink = s_rt.deathLinkReceivedAt >= 0 && NowMs() - s_rt.deathLinkReceivedAt < 15000;
-        if (!causedByDeathLink) {
+    if (dead && !s_rt.wasDead) {
+        if (s_rt.deathLinkKill) {
+            s_rt.deathLinkKill = false;  // the death another player caused
+        } else if (s_rt.save.deathLink && s_client) {
             s_client->SendDeathLink(s_rt.save.connection.slot + " fell in Hyrule.", UnixSeconds());
         }
-        s_rt.deathLinkReceivedAt = -1;
+    } else if (!dead && s_rt.deathLinkKill && dComIfGs_getLife() > 0) {
+        s_rt.deathLinkKill = false;  // saved by a fairy
     }
     s_rt.wasDead = dead;
 
@@ -883,7 +914,7 @@ void StartNewSaveConnection() {
     s_newSlot.reset();
     s_newPhase = NewSavePhase::Connecting;
     s_newMessage = "Connecting to " + s_newForm.server + "...";
-    EnsureClient().Connect(MakeConfig(s_newForm, false, false), NowMs());
+    ConnectClient(MakeConfig(s_newForm, false, false));
 }
 
 void CancelNewSave() {
@@ -933,7 +964,7 @@ ModResult OnNewSave() {
         s_client->SetAutoReconnect(true);
         s_client->SetDeathLink(s_rt.save.deathLink);
     } else {
-        EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+        ConnectClient(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink));
     }
     s_newPhase = NewSavePhase::Idle;
     s_pendingHash.clear();
@@ -1004,6 +1035,7 @@ ModResult OnSaveLoaded() {
     }
     s_rt.save = *state;
     s_rt.active = true;
+    s_capturedState.reset();
     if (!LoadSlot(s_rt.save.seed)) {
         Toast("Archipelago", "The data for this save's seed is missing. Locations will not be sent.", "warning",
             10000);
@@ -1015,14 +1047,42 @@ ModResult OnSaveLoaded() {
         s_rt.save.goal = true;
     }
     // Locations already done in this save are found by the first scan in game and sent then
-    if (!s_rt.save.connection.server.empty() && !s_rt.save.connection.slot.empty()) {
-        EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+    const auto& connection = s_rt.save.connection;
+    if (!connection.server.empty() && !connection.slot.empty()) {
+        // A new save keeps the connection it was created with
+        const bool keep = s_client && !s_verifiedSeed.empty() && s_verifiedSeed == s_rt.save.seed &&
+                          s_client->State() != ApState::Idle && s_client->State() != ApState::Failed &&
+                          s_client->Config().address == connection.server &&
+                          s_client->Config().slotName == connection.slot &&
+                          s_client->Config().password == connection.password;
+        if (keep) {
+            s_client->SetAutoReconnect(true);
+            s_client->SetDeathLink(s_rt.save.deathLink);
+        } else {
+            ConnectClient(MakeConfig(connection, true, s_rt.save.deathLink));
+        }
+    } else if (s_client) {
+        s_client->Disconnect();
+        s_verifiedSeed.clear();
     }
     return MOD_OK;
 }
 
+void OnSaveCaptured() {
+    if (s_rt.active) {
+        s_capturedState = SaveToJson(s_rt.save).dump();
+    }
+}
+
 void OnSaveWritten() {
-    WriteSaveBlob();
+    if (!s_rt.active) {
+        return;
+    }
+    // What the game wrote was captured earlier (the write is asynchronous): items given since
+    // then are not in it, so they must not be counted in it either
+    const std::string text = s_capturedState.value_or(SaveToJson(s_rt.save).dump());
+    s_capturedState.reset();
+    svc_mng.save->set_blob(mod_ctx, kStateBlobName, text.data(), text.size());
 }
 
 void OnGameReset() {
@@ -1084,9 +1144,9 @@ void ObserveGive(const ItemGiveInfo* info) {
         while (s_rt.doneItems.erase(s_rt.save.received) != 0) {
             ++s_rt.save.received;
         }
-        if (s_client && index < s_client->Items().size()) {
+        if (s_client && s_rt.slot && s_verifiedSeed == s_rt.save.seed && index < s_client->Items().size()) {
             const auto& item = s_client->Items()[index];
-            const int64_t local = item.item - (s_rt.slot ? s_rt.slot->itemIdBase : 0);
+            const int64_t local = item.item - s_rt.slot->itemIdBase;
             std::string itemName = s_client->ItemName(item.item, s_client->Slot());
             if (const auto it = ItemNames().find(static_cast<uint8_t>(local)); it != ItemNames().end()) {
                 itemName = it->second;
@@ -1118,7 +1178,7 @@ void ConnectSave() {
     if (!s_rt.active || s_rt.save.connection.server.empty() || s_rt.save.connection.slot.empty()) {
         return;
     }
-    EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
+    ConnectClient(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink));
     if (!s_rt.checked.empty()) {
         s_client->CheckLocations({s_rt.checked.begin(), s_rt.checked.end()});
     }

@@ -154,6 +154,16 @@ void ApClient::Connect(const ApClientConfig& config, int64_t nowMs) {
     mRetryCount = 0;
     mLocalChecked.clear();
     mGoal = false;
+    // Nothing from a previous room or slot may be taken for this one
+    mItems.clear();
+    mServerChecked.clear();
+    mMissing.clear();
+    mPlayers.clear();
+    mSlotGames.clear();
+    mTeam = 0;
+    mSlot = 0;
+    mHintPoints = 0;
+    mSeedName.clear();
     if (mUrls.empty()) {
         SetState(ApState::Failed, "\"" + config.address + "\" is not a valid server address.");
         return;

@@ -32,6 +32,8 @@ ModResult OnNewSave();
 /// from the cached slot data if they are missing or obsolete. Returns the hash to activate.
 std::string PrepareSeed(const std::string& seedHash);
 ModResult OnSaveLoaded();
+/// The game copied its save data for writing (dComIfGs_setMemoryToCard).
+void OnSaveCaptured();
 void OnSaveWritten();
 void OnGameReset();
 void Tick();
