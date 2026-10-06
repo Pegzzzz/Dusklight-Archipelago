@@ -10,6 +10,9 @@
 #include "stages.h"
 #include "tools.h"
 #include "verify_item_functions.h"
+#include "archipelago/ap_game.hpp"
+
+#include <dolphin/dvd.h>
 
 namespace {
 void item_func_FOOLISH_ITEM() {
@@ -1393,7 +1396,7 @@ dItem_itemResource item_resource_randomizer[] = {
     /* 0xD9 */ {"N_gD_mskB", 0x0004,-0x0001,-0x0001, -0x0001,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
     /* 0xDA */ {"N_gD_mskT", 0x0004,-0x0001,-0x0001, -0x0001,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
     /* 0xDB */ {"MirrorB", 0x0009,-0x0001,-0x0001, -0x0001,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
-    /* 0xDC */ {"O_gD_memo", 0x0003,-0x0001,-0x0001, -0x0001,-0x0001, 0x0, -0x1, 0x003D, 0x64, 0x0000}, // Archipelago item
+    /* 0xDC */ {"O_gD_ap", 0x0003,-0x0001,-0x0001, -0x0001,-0x0001, 0x0, -0x1, 0x003D, 0x64, 0x0000}, // Archipelago item (see choose_archipelago_item_model)
     /* 0xDD */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0x0007,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
     /* 0xDE */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0x0007,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
     /* 0xDF */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0x0007,-0x0001, 0x0, -0x1, 0x002D, 0x64, 0x0000},
@@ -1651,7 +1654,7 @@ dItem_fieldItemResource field_item_res_randomizer[] = {
     /* 0xD9 */ {"N_gD_mskB", 0x0004,-0x0001,-0x0001, 0xFF, 0x1000},
     /* 0xDA */ {"N_gD_mskT", 0x0004,-0x0001,-0x0001, 0xFF, 0x1000},
     /* 0xDB */ {"MirrorB", 0x0009,-0x0001,-0x0001, 0xFF, 0x1000},
-    /* 0xDC */ {"O_gD_memo", 0x0003,-0x0001,-0x0001, 0xFF, 0x1000}, // Archipelago item
+    /* 0xDC */ {"O_gD_ap", 0x0003,-0x0001,-0x0001, 0xFF, 0x4000}, // Archipelago item (see choose_archipelago_item_model)
     /* 0xDD */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0xFF, 0x1000},
     /* 0xDE */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0xFF, 0x1000},
     /* 0xDF */ {"F_gD_rupy", 0x0004,-0x0001,-0x0001, 0xFF, 0x1000},
@@ -1747,10 +1750,22 @@ static dItem_fieldItemResource s_vanilla_field_item_res[255];
 static dItem_itemInfo s_vanilla_item_info[255];
 static bool s_applied = false;
 
+// The Archipelago item (0xDC) is the 3D Archipelago logo, which the mod bundle adds to the game as
+// /res/Object/O_gD_ap.arc (overlay/, built by tools/models/make_ap_item.py). The game's paper note
+// model stands in when the player chose it, or if that archive isn't there.
+static void choose_archipelago_item_model() {
+    const bool logo = !archi::game::ClassicItemModel() && DVDConvertPathToEntrynum("/res/Object/O_gD_ap.arc") >= 0;
+    const char* arc = logo ? "O_gD_ap" : "O_gD_memo";
+    item_resource_randomizer[dItemNo_Randomizer_NOENTRY_220_e].mArcName = arc;
+    field_item_res_randomizer[dItemNo_Randomizer_NOENTRY_220_e].mFieldArc = arc;
+    field_item_res_randomizer[dItemNo_Randomizer_NOENTRY_220_e].mHeapSize = logo ? 0x4000 : 0x1000;
+}
+
 void apply_item_data_tables() {
     if (s_applied) {
         return;
     }
+    choose_archipelago_item_model();
     std::memcpy(s_vanilla_item_resource, dItem_data::item_resource, sizeof(s_vanilla_item_resource));
     std::memcpy(s_vanilla_field_item_res, dItem_data::field_item_res, sizeof(s_vanilla_field_item_res));
     std::memcpy(s_vanilla_item_info, dItem_data::item_info, sizeof(s_vanilla_item_info));

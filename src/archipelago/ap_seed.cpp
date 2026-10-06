@@ -248,6 +248,28 @@ std::string ForeignGetItemText(const ApLocation* location, int language) {
     return text;
 }
 
+std::vector<std::string> ExpectedDusklightSettings(const SlotData& slot) {
+    std::vector<std::string> expected;
+    for (const auto& [name, value] : slot.settings) {
+        if (name == "Logic Transform Anywhere" && value == "On") {
+            expected.emplace_back("Settings > Cheats > Can Transform Anywhere: On");
+        } else if (name == "Logic Increase Wallet Capacity" && value == "On") {
+            expected.emplace_back("Settings > Gameplay > Bigger Wallets: On");
+        } else if (name == "Logic Damage Multiplier") {
+            if (value == "Double") {
+                expected.emplace_back("Settings > Gameplay > Damage Multiplier: x2");
+            } else if (value == "Triple") {
+                expected.emplace_back("Settings > Gameplay > Damage Multiplier: x3");
+            } else if (value == "Quadruple") {
+                expected.emplace_back("Settings > Gameplay > Damage Multiplier: x4");
+            } else if (value == "OHKO") {
+                expected.emplace_back("Settings > Gameplay > Instant Death: On");
+            }
+        }
+    }
+    return expected;
+}
+
 std::string ForeignItemText(const ApLocation& location) {
     return SanitizeForGameText(location.owner, 24) + "'s " + SanitizeForGameText(location.item);
 }

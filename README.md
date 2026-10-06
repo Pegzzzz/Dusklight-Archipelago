@@ -14,8 +14,10 @@ It comes in two parts, released together:
   its logic is a port of the randomizer's logic (form, time of day, twilight), tested against the
   C++ generator.
 
-Players: see the [setup guide](apworld/tp_dusklight/docs/setup_en.md) and the
-[game page](<apworld/tp_dusklight/docs/en_Twilight Princess Dusklight.md>).
+Players: start with the **[tutorial](docs/TUTORIAL.md)**, which goes from installing everything to
+finishing a multiworld. The [setup guide](apworld/tp_dusklight/docs/setup_en.md) and the
+[game page](<apworld/tp_dusklight/docs/en_Twilight Princess Dusklight.md>) are the short versions
+shown by Archipelago.
 
 ## How it works
 
@@ -28,7 +30,8 @@ Players: see the [setup guide](apworld/tp_dusklight/docs/setup_en.md) and the
    settings plus a plandomizer file, and runs the randomizer generator in an "Archipelago" mode
    (`generator/`, `src/archipelago/ap_seed.cpp`). Every patch, flag and text of a normal randomizer
    seed is produced; only the placements come from the multiworld. Other players' items become the
-   "Archipelago Item" (0xDC), shown as a scroll with a text naming the owner and the item.
+   "Archipelago Item" (0xDC), shown as the Archipelago logo in 3D (`overlay/res/Object/O_gD_ap.arc`,
+   built by `tools/models/make_ap_item.py`) with a text naming the owner and the item.
 3. **Playing (mod).** `src/archipelago/ap_game.cpp` reports locations from the save flags and from
    Dusklight's item give events, gives received items through Dusklight's item queue, detects the
    final blow on Ganondorf, and handles DeathLink. `ap_client.cpp` speaks Archipelago's protocol
@@ -73,6 +76,11 @@ PYTHONPATH=archipelago python apworld/tools/parity_test.py --harness build/ap_pa
 
 # The mod's network client against a real MultiServer
 python apworld/tools/client_test.py archipelago build/ap_client_driver
+
+# The Archipelago item model: read back by an independent script, then loaded with Dusklight's own
+# J3D loader and display list code, as the game loads it (needs xxhash's header, e.g. libxxhash-dev)
+python tools/models/check_ap_item.py --preview ap_item.png
+cmake --build build --target ap_model_harness && build/ap_model_harness overlay/res/Object/O_gD_ap.arc
 ```
 
 What needs the game itself (save flags, the item queue, the get-item text, the menus) can only be

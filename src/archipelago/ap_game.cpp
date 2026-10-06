@@ -134,6 +134,7 @@ ConfigVarHandle s_cfgServer{};
 ConfigVarHandle s_cfgSlot{};
 ConfigVarHandle s_cfgUuid{};
 ConfigVarHandle s_cfgToasts{};
+ConfigVarHandle s_cfgClassicModel{};
 
 std::string GetConfigString(ConfigVarHandle var) {
     size_t length = 0;
@@ -163,6 +164,11 @@ void RegisterConfig() {
     toasts.type = CONFIG_VAR_BOOL;
     toasts.default_bool = true;
     svc_mng.config->register_var(mod_ctx, &toasts, &s_cfgToasts);
+    ConfigVarDesc classicModel = CONFIG_VAR_DESC_INIT;
+    classicModel.name = "ap_classic_item_model";
+    classicModel.type = CONFIG_VAR_BOOL;
+    classicModel.default_bool = false;
+    svc_mng.config->register_var(mod_ctx, &classicModel, &s_cfgClassicModel);
 
     if (GetConfigString(s_cfgUuid).empty()) {
         std::mt19937_64 random{std::random_device{}()};
@@ -588,7 +594,7 @@ void Listener::OnStateChanged(ApState state, const std::string& detail) {
     }
 }
 
-bool LoadSlot(const std::string& seed);
+bool LoadSlot(const std::string& seed, std::string* problem = nullptr);
 
 void Listener::OnConnected(const json& slotData) {
     if (s_newPhase == NewSavePhase::Connecting) {
@@ -658,7 +664,13 @@ void Listener::OnConnected(const json& slotData) {
     if (!s_rt.slot) {
         // The save was made on another device, or this seed's files were deleted: take the slot
         // data from the room (the seed itself is rebuilt from it when the save is loaded)
-        if (WriteText(SlotDataPath(seed), slotData.dump()) && LoadSlot(seed)) {
+        std::string problem;
+        if (!WriteText(SlotDataPath(seed), slotData.dump())) {
+            mods::log::error("Archipelago: could not write the slot data of seed {}", seed);
+        } else if (!LoadSlot(seed, &problem)) {
+            AddLog(EscapeRml(problem));
+            Toast("Archipelago", EscapeRml(problem), "warning", 15000);
+        } else {
             mods::log::info("Archipelago: restored the slot data of seed {} from the room", seed);
             if (randomizer_GetContext().mHash.empty()) {
                 const std::string message = "This save's seed was missing and has been restored from the room. "
@@ -845,7 +857,8 @@ void ResetRuntime() {
     s_rt = Runtime{};
 }
 
-bool LoadSlot(const std::string& seed) {
+// problem: set when the slot data is there but can't be used (e.g. another APWorld version)
+bool LoadSlot(const std::string& seed, std::string* problem) {
     const auto text = ReadText(SlotDataPath(seed));
     if (!text) {
         mods::log::error("Archipelago: missing slot data for seed {}", seed);
@@ -856,10 +869,16 @@ bool LoadSlot(const std::string& seed) {
         s_rt.slot = SlotData::Parse(json::parse(*text), error);
         if (!s_rt.slot) {
             mods::log::error("Archipelago: {}", error);
+            if (problem != nullptr) {
+                *problem = error;
+            }
             return false;
         }
     } catch (const std::exception& e) {
         mods::log::error("Archipelago: bad slot data for seed {}: {}", seed, e.what());
+        if (problem != nullptr) {
+            *problem = "This save's Archipelago data is damaged.";
+        }
         return false;
     }
     s_rt.index.Build(*s_rt.slot);
@@ -1047,9 +1066,10 @@ ModResult OnSaveLoaded() {
     s_rt.save = *state;
     s_rt.active = true;
     s_capturedState.reset();
-    if (!LoadSlot(s_rt.save.seed)) {
-        Toast("Archipelago", "This save's seed data is missing on this device. It will be restored from the "
-            "room once connected.", "warning", 10000);
+    if (std::string problem; !LoadSlot(s_rt.save.seed, &problem)) {
+        Toast("Archipelago", problem.empty() ? std::string{"This save's seed data is missing on this device. It will be "
+                                                           "restored from the room once connected."} :
+                                               EscapeRml(problem), "warning", 10000);
     }
     s_rt.save.seedHash = randomizer_GetContext().mHash;
     s_rt.goalSent = false;
@@ -1299,6 +1319,28 @@ bool ToastsEnabled() {
 void SetToastsEnabled(bool enabled) {
     if (s_cfgToasts != 0) {
         svc_mng.config->set_bool(mod_ctx, s_cfgToasts, enabled);
+    }
+}
+
+std::vector<std::string> NewSaveExpectedSettings() {
+    return s_newSlot ? ExpectedDusklightSettings(*s_newSlot) : std::vector<std::string>{};
+}
+
+std::vector<std::string> SaveExpectedSettings() {
+    return s_rt.active && s_rt.slot ? ExpectedDusklightSettings(*s_rt.slot) : std::vector<std::string>{};
+}
+
+bool ClassicItemModel() {
+    bool value = false;
+    if (s_cfgClassicModel != 0) {
+        svc_mng.config->get_bool(mod_ctx, s_cfgClassicModel, &value);
+    }
+    return value;
+}
+
+void SetClassicItemModel(bool enabled) {
+    if (s_cfgClassicModel != 0) {
+        svc_mng.config->set_bool(mod_ctx, s_cfgClassicModel, enabled);
     }
 }
 

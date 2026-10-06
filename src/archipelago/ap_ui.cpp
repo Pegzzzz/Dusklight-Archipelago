@@ -93,6 +93,18 @@ struct NewSaveWindow {
 };
 NewSaveWindow s_newSave;
 
+// The Dusklight settings a seed's logic counts on, which the player has to turn on themselves
+std::string ExpectedSettingsRml(const std::vector<std::string>& settings) {
+    if (settings.empty()) {
+        return {};
+    }
+    std::string rml = "<br/><span style=\"color: #ffd27f;\">This seed's logic expects these Dusklight settings:</span>";
+    for (const auto& setting : settings) {
+        rml += "<br/>- " + game::EscapeRml(setting);
+    }
+    return rml;
+}
+
 std::string NewSaveStatusRml() {
     using game::NewSavePhase;
     const std::string message = game::EscapeRml(game::NewSaveMessage());
@@ -107,7 +119,8 @@ std::string NewSaveStatusRml() {
         return message + (step.empty() ? "" : "<br/>" + game::EscapeRml(step));
     }
     case NewSavePhase::Ready:
-        return "<span style=\"color: #7fff7f;\">" + message + "</span> Press Start to name your file.";
+        return "<span style=\"color: #7fff7f;\">" + message + "</span> Press Start to name your file." +
+               ExpectedSettingsRml(game::NewSaveExpectedSettings());
     case NewSavePhase::Error:
         return "<span style=\"color: #ff8080;\">" + message + "</span>";
     }
@@ -188,7 +201,8 @@ std::string GameStatsRml() {
         return {};
     }
     return fmt::format("Locations checked: {} / {}<br/>Items received: {}", game::CheckedLocationCount(),
-        game::LocationCount(), game::ReceivedItemCount());
+               game::LocationCount(), game::ReceivedItemCount()) +
+           ExpectedSettingsRml(game::SaveExpectedSettings());
 }
 
 std::string LogRml(size_t lines) {
@@ -395,13 +409,18 @@ void UnregisterMenuTab() {
 }
 
 ModResult BuildModsPanel(ModContext* ctx, UiElementHandle pane, void*, ModError*) {
-    AddText(pane, "To play, select \"Archipelago\" from the Dusklight menu, create a new save and connect "
-                  "to your Archipelago room.");
-    AddText(pane, "While playing, the Archipelago tab of the pause menu shows the connection and the "
-                  "room's messages.");
+    AddText(pane, "To play, switch the game mode button on Dusklight's start screen to \"Archipelago\", "
+                  "choose an empty file and connect to your Archipelago room.");
+    AddText(pane, "While playing, the Archipelago tab of the Dusklight menu shows the connection, the "
+                  "room's messages and your remaining locations.");
     AddToggle(pane, "Notifications", "Pop-ups for items sent and received, hints and chat.",
         [](ModContext*, void*, UiControlValue* out) { out->bool_value = game::ToastsEnabled(); },
         [](ModContext*, void*, const UiControlValue* value) { game::SetToastsEnabled(value->bool_value); });
+    AddToggle(pane, "Classic item model",
+        "Show other players' items as a paper note instead of the 3D Archipelago logo. Takes effect the "
+        "next time a save is loaded.",
+        [](ModContext*, void*, UiControlValue* out) { out->bool_value = game::ClassicItemModel(); },
+        [](ModContext*, void*, const UiControlValue* value) { game::SetClassicItemModel(value->bool_value); });
     (void)ctx;
     return MOD_OK;
 }

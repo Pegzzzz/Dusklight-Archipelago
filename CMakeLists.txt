@@ -198,6 +198,7 @@ add_mod(tp_archipelago
     SOURCES  src/mod.cpp ${RANDOMIZER_GENERATOR_SOURCES} ${RANDOMIZER_SOURCES}
     MOD_JSON mod.json
     RES_DIR  res
+    OVERLAY_DIR overlay
     BUNDLE
 )
 
@@ -306,4 +307,44 @@ if (UNIX AND NOT APPLE AND NOT ANDROID)
             RANDO_DATA_PATH="generator/data/"
             SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE})
     target_link_options(ap_seeddata_test PRIVATE "LINKER:--unresolved-symbols=ignore-all")
+endif ()
+
+# Archipelago: loads the Archipelago item model (overlay/res/Object/O_gD_ap.arc) with Dusklight's own
+# J3D loader and display list code, like the game does (Linux only: needs xxhash's header)
+find_path(AP_XXHASH_INCLUDE_DIR xxhash.h)
+if (UNIX AND NOT APPLE AND NOT ANDROID AND DUSKLIGHT_DIR AND AP_XXHASH_INCLUDE_DIR
+        AND EXISTS "${DUSKLIGHT_DIR}/libs/JSystem/src/J3DGraphLoader/J3DModelLoader.cpp")
+    enable_language(C)
+    set(_j3d "${DUSKLIGHT_DIR}/libs/JSystem/src")
+    set(_aurora "${DUSKLIGHT_DIR}/extern/aurora/lib")
+    file(GLOB _j3d_sources "${_j3d}/J3DGraphBase/*.cpp" "${_j3d}/J3DGraphAnimator/*.cpp")
+    file(GLOB _aurora_sources "${_aurora}/dolphin/mtx/*.c" "${_aurora}/dolphin/gd/*.cpp")
+    # aurora's display list reader, without its WebGPU-bound gx.hpp
+    file(READ "${_aurora}/gx/dl.cpp" _dl_source)
+    string(REPLACE "#include \"../internal.hpp\"" "#include \"harness_aurora.hpp\"" _dl_source "${_dl_source}")
+    string(REPLACE "#include \"gx.hpp\"" "" _dl_source "${_dl_source}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ap_model_harness_src/aurora_dl.cpp" "${_dl_source}")
+    add_executable(ap_model_harness EXCLUDE_FROM_ALL
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/models/harness/main.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/models/harness/stubs.cpp
+            ${_j3d}/J3DGraphLoader/J3DModelLoader.cpp
+            ${_j3d}/J3DGraphLoader/J3DModelLoaderCalcSize.cpp
+            ${_j3d}/J3DGraphLoader/J3DMaterialFactory.cpp
+            ${_j3d}/J3DGraphLoader/J3DMaterialFactory_v21.cpp
+            ${_j3d}/J3DGraphLoader/J3DJointFactory.cpp
+            ${_j3d}/J3DGraphLoader/J3DShapeFactory.cpp
+            ${_j3d}/JUtility/JUTNameTab.cpp
+            ${_j3d_sources}
+            ${_aurora_sources}
+            ${CMAKE_CURRENT_BINARY_DIR}/ap_model_harness_src/aurora_dl.cpp)
+    target_include_directories(ap_model_harness BEFORE PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/models/harness/include)
+    target_include_directories(ap_model_harness PRIVATE
+            ${DUSKLIGHT_DIR}/src ${_aurora} ${AP_XXHASH_INCLUDE_DIR})
+    target_link_libraries(ap_model_harness PRIVATE dusklight_game_abi_headers fmt::fmt)
+    target_compile_options(ap_model_harness PRIVATE -w
+            "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include global.h>")
+    target_compile_definitions(ap_model_harness PRIVATE NDEBUG)
+    target_link_options(ap_model_harness PRIVATE "LINKER:--unresolved-symbols=ignore-all" -no-pie)
+    set_target_properties(ap_model_harness PROPERTIES POSITION_INDEPENDENT_CODE OFF)
 endif ()

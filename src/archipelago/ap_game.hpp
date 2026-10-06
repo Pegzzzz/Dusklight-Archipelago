@@ -58,6 +58,9 @@ struct ConnectionForm {
 enum class NewSavePhase { Idle, Connecting, Generating, Ready, Error };
 
 ConnectionForm& NewSaveForm();
+/// Dusklight settings the connected slot's logic counts on (new save, and loaded save)
+std::vector<std::string> NewSaveExpectedSettings();
+std::vector<std::string> SaveExpectedSettings();
 NewSavePhase GetNewSavePhase();
 const std::string& NewSaveMessage();
 void StartNewSaveConnection();
@@ -79,6 +82,10 @@ bool DeathLinkEnabled();
 void SetDeathLinkEnabled(bool enabled);
 bool ToastsEnabled();
 void SetToastsEnabled(bool enabled);
+/// Other players' items look like a paper note (the game's own model) instead of the 3D
+/// Archipelago logo. Applies when a save's seed is loaded.
+bool ClassicItemModel();
+void SetClassicItemModel(bool enabled);
 
 size_t LocationCount();
 /// Names of this world's Archipelago locations that are not checked yet.

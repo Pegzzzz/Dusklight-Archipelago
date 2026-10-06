@@ -78,6 +78,10 @@ std::string NameForGameText(const std::string& utf8, size_t maxChars, bool japan
 /// broken for the item text box, control codes applied.
 std::string ForeignGetItemText(const ApLocation* location, int language);
 
+/// Dusklight settings (not seed settings) the slot's logic counts on, as menu paths with their
+/// value, e.g. "Settings > Cheats > Can Transform Anywhere: On". Empty when it needs none.
+std::vector<std::string> ExpectedDusklightSettings(const SlotData& slot);
+
 /// Writes settings.yaml, preferences.yaml and plando.yaml for the slot into dir.
 void WriteGenerationFiles(const std::filesystem::path& dir, const SlotData& slot);
 

@@ -41,7 +41,9 @@ allow it, your dungeon keys, maps and compasses.
 
 ## What does another world's item look like?
 
-A scroll, like the Hidden Skill letters. Opening a chest or picking it up shows whose item it is and
+The Archipelago logo in 3D: six colored spheres on a ring, spinning like other items (a paper note
+instead, if you turn on **Classic item model** in the mod's settings). Opening a chest or picking it
+up shows whose item it is and
 what it is, for example "You found Bob's Moon Pearl!", coloured like Archipelago does (progression
 items in purple, useful ones in blue, traps in red). Shops and characters also name the other
 player's item.
