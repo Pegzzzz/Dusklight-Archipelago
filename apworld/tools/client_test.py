@@ -116,7 +116,7 @@ def start_server(args, multidata: str, port: int) -> subprocess.Popen:
               "sys.argv = ['MultiServer.py'] + sys.argv[1:]\n"
               "runpy.run_path('MultiServer.py', run_name='__main__')\n")
     log = open(os.path.join(os.path.dirname(multidata), f"server_{time.time():.0f}.log"), "w")
-    return subprocess.Popen([args.python, "-c", script, multidata, "--host", "127.0.0.1", "--port", str(port),
+    return subprocess.Popen([args.python, "-c", script, multidata, "--host", "0.0.0.0", "--port", str(port),
                              "--password", "secret", "--disable_save", "--loglevel", "info"],
                             cwd=args.ap_dir, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
 
@@ -162,9 +162,9 @@ def main() -> int:
                     what="InvalidPassword refusal")
             print("ok: refusals reported (invalid address, unknown slot, wrong password)")
 
-            # Non-local name: wss is tried first (unsupported in the driver), then ws
-            host_ip = socket.gethostbyname(socket.gethostname())
-            p2.send(f"connect {host_ip if host_ip != '127.0.0.1' else '127.0.0.1'}:{port} Link2 secret")
+            # Non-local address: wss is tried first (unsupported in the driver), then ws
+            # 127.0.0.2 is this machine too, but not a name the client treats as local
+            p2.send(f"connect 127.0.0.2:{port} Link2 secret")
             c2 = p2.wait(lambda e: e.get("event") == "connected", what="Link2 connected")
             p1.send(f"connect ws://localhost:{port} Link1 secret")
             c1 = p1.wait(lambda e: e.get("event") == "connected", what="Link1 connected")

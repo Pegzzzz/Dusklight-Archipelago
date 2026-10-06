@@ -6,7 +6,7 @@
   Princess (Dusklight does not include the game).
 - The **Twilight Princess Archipelago** mod (`tp_archipelago.dusk`) and the **APWorld**
   (`tp_dusklight.apworld`), both from the same release on
-  [the project's releases page](https://github.com/Pegzzzz/dusklight-archipelago/releases).
+  [the project's releases page](https://github.com/Pegzzzz/Dusklight-Archipelago/releases).
 - [Archipelago](https://github.com/ArchipelagoMW/Archipelago/releases) 0.6.4 or newer, to generate
   and host multiworlds.
 
@@ -79,7 +79,7 @@ The **Archipelago** tab of the pause menu has:
 - **Connection**: the status, how many locations you checked and items you received, the room's
   address, DeathLink and notifications.
 - **Messages**: the room's messages (items found, hints, chat) and a field to chat or use commands
-  such as `!hint Clawshot`, `!remaining` or `!release`.
+  such as `!hint Progressive Clawshot`, `!remaining` or `!release`.
 - **Locations**: the locations of your world that are not checked yet.
 
 ## Troubleshooting

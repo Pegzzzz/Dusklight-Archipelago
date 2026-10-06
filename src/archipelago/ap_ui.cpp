@@ -253,7 +253,7 @@ ModResult BuildMessagesTab(ModContext*, UiWindowHandle, UiElementHandle left, Ui
     UiControlDesc chat = UI_CONTROL_DESC_INIT;
     chat.kind = UI_CONTROL_STRING;
     chat.label = "Say";
-    chat.help_rml = "Sends a chat message or a server command such as <b>!hint Clawshot</b> or "
+    chat.help_rml = "Sends a chat message or a server command such as <b>!hint Progressive Clawshot</b> or "
                     "<b>!remaining</b>.";
     chat.max_length = 400;
     chat.string_set_mode = UI_STRING_SET_ON_COMMIT;

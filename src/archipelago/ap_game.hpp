@@ -41,7 +41,11 @@ void Tick();
 /// Check resolution for items given by the Archipelago client ("ap:recv:<n>").
 bool ResolveCheck(const ItemCheckInfo* info, ItemCheckResolution* outResult);
 /// Every resolved check, to know which location a get-item message is about.
-void NoteResolution(const char* checkName, uint8_t item);
+void NoteResolution(const ItemCheckInfo* info, uint8_t item);
+/// For the get-item fanfare of another player's item.
+bool ForeignItemIsProgression();
+/// A registered get-item message for another player's item, if the game has no message 321 (else 0).
+uint16_t ForeignFallbackMessageId();
 void ObserveGive(const ItemGiveInfo* info);
 
 // ---- For the UI (ap_ui.cpp) ----

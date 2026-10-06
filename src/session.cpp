@@ -121,7 +121,7 @@ bool resolve_check(ModContext*, const ItemCheckInfo* info, ItemCheckResolution* 
     const bool resolved = resolve_seed_check(info, outResult);
     if (resolved) {
         // An item for another world: remember where it came from for the get-item text
-        archi::game::NoteResolution(info->name, outResult->item);
+        archi::game::NoteResolution(info, outResult->item);
     }
     return resolved;
 }

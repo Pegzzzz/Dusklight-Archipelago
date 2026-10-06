@@ -85,7 +85,20 @@ jobs:
           cmake -B build "${args[@]}"
 
       - name: Build
-        run: cmake --build build --parallel
+        shell: bash
+        run: |
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee build.log
+
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          # Annotations are readable without signing in, unlike the logs
+          if [ -f build.log ]; then
+            msg=$(grep -iE "error|undefined|fatal" build.log | head -n 40 | awk 'BEGIN{ORS="%0A"} {gsub(/%/,"%25"); print}')
+            echo "::error title=Build errors::$msg"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -171,16 +184,33 @@ jobs:
       - name: Logic parity (Python port vs. C++ generator)
         env:
           PYTHONPATH: archipelago
-        run: python apworld/tools/parity_test.py --harness build/ap_parity_harness --samples 100 --random-presets 40
+        run: |
+          set -o pipefail
+          python apworld/tools/parity_test.py --harness build/ap_parity_harness --samples 100 \
+            --random-presets 40 2>&1 | tee parity_test.log
 
       - name: Slot data to in-game seed
-        working-directory: archipelago
-        run: >-
-          python ../apworld/tools/seed_test.py --ap-tool ../build/ap_tool
-          --seeddata-test ../build/ap_seeddata_test --count 8
+        run: |
+          set -o pipefail
+          cd archipelago
+          python ../apworld/tools/seed_test.py --ap-tool ../build/ap_tool \
+            --seeddata-test ../build/ap_seeddata_test --count 8 2>&1 | tee ../seed_test.log
 
       - name: Network client against MultiServer
-        run: python apworld/tools/client_test.py archipelago build/ap_client_driver
+        run: |
+          set -o pipefail
+          python apworld/tools/client_test.py archipelago build/ap_client_driver 2>&1 | tee client_test.log
+
+      - name: Report test failures
+        if: failure()
+        run: |
+          # Annotations are readable without signing in, unlike the logs
+          for log in parity_test.log seed_test.log client_test.log; do
+            [ -f "$log" ] || continue
+            msg=$(grep -vE "^ *(File|\^|~)|Could not load world|UserWarning|warnings.warn" "$log" | tail -n 40 \
+              | awk 'BEGIN{ORS="%0A"} {gsub(/%/,"%25"); print}')
+            echo "::error title=$log::$msg"
+          done
 
   combine:
     name: Combine bundles

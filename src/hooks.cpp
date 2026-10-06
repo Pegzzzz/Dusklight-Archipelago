@@ -1860,6 +1860,10 @@ HookAction hookPreSetGetSubBgm(ModContext*, void* args, void*, void*) {
     auto* i_this = mods::arg<daAlink_c*>(args, 0);
     const int i_itemNo = mods::arg<int>(args, 1);
     u32 se_type = getSeTypeRandomizer[i_itemNo];
+    // Archipelago: another player's item gets the big fanfare only when it is progression
+    if (i_itemNo == dItemNo_Randomizer_NOENTRY_220_e && !archi::game::ForeignItemIsProgression()) {
+        se_type = SETYPE_ITEM_GET_MINI;
+    }
 
     if (se_type == SETYPE_ITEM_GET_ME && i_this->mProcVar4.field_0x3010 == 0) {
         se_type = SETYPE_ITEM_GET_ME_S;
@@ -1875,6 +1879,18 @@ HookAction hookPreSetGetSubBgm(ModContext*, void* args, void*, void*) {
 
 HookAction hookPreProcCoGetItem(ModContext*, void* args, void*, void*) {
     auto* i_this = mods::arg<daAlink_c*>(args, 0);
+
+    // Archipelago: another player's item, when the game has no native text to override for it
+    if (i_this->field_0x32cc == 0 && i_this->mProcVar2.field_0x300c == dItemNo_Randomizer_NOENTRY_220_e) {
+        auto* partner = fopAcM_getItemEventPartner(i_this);
+        if (partner != nullptr && !fpcM_IsCreating(fpcM_GetID(partner))) {
+            if (const uint16_t message = archi::game::ForeignFallbackMessageId(); message != 0) {
+                i_this->field_0x32cc = message;
+            }
+        }
+        return HOOK_CONTINUE;
+    }
+
     if (i_this->field_0x32cc != 0 || i_this->mProcVar2.field_0x300c != dItemNo_Randomizer_POU_SPIRIT_e) {
         return HOOK_CONTINUE;
     }

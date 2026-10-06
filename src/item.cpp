@@ -309,6 +309,12 @@ void item_func_ELDIN_BRIDGE_PORTAL() {
     dComIfGs_onStageSwitch(0x6, 0x63); // Unlock Eldin Bridge Portal
 }
 
+// Archipelago: an item for another player is never "owned", so a freestanding one always gets its
+// get-item box (daItem_c::procWaitGetDemoEvent skips the demo for owned items)
+int item_getcheck_func_ARCHIPELAGO_ITEM() {
+    return 0;
+}
+
 int item_getcheck_func_ORDON_PORTAL() {
     return dComIfGs_isStageSwitch(0x0, 0x34); // Unlock Ordon Portal
 }
@@ -1066,7 +1072,7 @@ static int (*item_getcheck_func_ptr_randomizer[256])() = {
     /* 0xD9 */ item_getcheck_func_FUSED_SHADOW_2,
     /* 0xDA */ item_getcheck_func_FUSED_SHADOW_3,
     /* 0xDB */ item_getcheck_func_MIRROR_PIECE_1,
-    /* 0xDC */ item_getcheck_func_noentry,
+    /* 0xDC */ item_getcheck_func_ARCHIPELAGO_ITEM,
     /* 0xDD */ item_getcheck_func_noentry,
     /* 0xDE */ item_getcheck_func_noentry,
     /* 0xDF */ item_getcheck_func_noentry,

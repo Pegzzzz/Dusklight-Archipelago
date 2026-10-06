@@ -17,6 +17,9 @@
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_b_gnd.h"
 #include "d/d_com_inf_game.h"
+#include "d/d_meter2_info.h"
+#include "d/d_msg_object.h"
+#include "f_op/f_op_actor.h"
 #include "f_op/f_op_actor_mng.h"
 
 #include <mods/items.h>
@@ -27,6 +30,7 @@
 
 #include <fmt/format.h>
 
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -46,7 +50,11 @@
 #endif
 
 namespace randomizer {
+// generator/utility/text.cpp
 std::string UTF8ToShiftJIS(const std::string& utf8Str);
+std::string UTF8ToCP1252(const std::string& utf8Str);
+void breakLines(std::string& str, float maxStrLength, int lang);
+void applyMessageCodes(std::string& str);
 }
 
 namespace randomizer::archi::game {
@@ -204,13 +212,21 @@ struct Runtime {
     bool wasDead = false;
     bool deathLinkKill = false;  // Link's life was set to 0 by a DeathLink; his death is not sent back
     bool goalSent = false;
-    // The last foreign item a check resolved to, for the get-item text
-    const ApLocation* lastForeign = nullptr;
+    // Checks resolved to another player's item, for the get-item text (see ForeignLocationShown)
+    struct ForeignNote {
+        const ApLocation* location;
+        uint64_t frame;
+    };
+    std::deque<ForeignNote> foreignNotes;
+    std::unordered_map<uint32_t, const ApLocation*> foreignByTag;  // item give tag -> location
+    std::unordered_map<const ApLocation*, std::array<std::string, 7>> foreignTexts;  // per language
+    bool messageChecked = false;
     // Received items announced as "N items received" instead of one by one
     std::vector<std::string> pendingReceived;
 };
 
 Runtime s_rt;
+uint64_t s_frame = 0;
 
 std::unique_ptr<ApClient> s_client;
 // The slot seed the client's current item list was checked against (see OnConnected): items are
@@ -221,6 +237,9 @@ std::optional<std::string> s_capturedState;
 std::deque<std::string> s_log;
 uint64_t s_logVersion = 0;
 std::vector<mods::flow::MessageOverride> s_messageOverrides;
+// Set when the game has no native message 321 to override (see CheckForeignMessage)
+bool s_foreignMessageMissing = false;
+mods::flow::RegisteredMessage s_fallbackMessage;
 
 // ---------------------------------------------------------------------------------------------
 // Notifications
@@ -403,81 +422,103 @@ void WriteSaveBlob() {
 // ---------------------------------------------------------------------------------------------
 // Get-item text for other players' items
 
-std::string WrapLine(const std::string& text, size_t width, size_t maxLines) {
-    std::string out;
-    std::string line;
-    size_t lines = 1;
-    std::istringstream words{text};
-    std::string word;
-    while (words >> word) {
-        if (!line.empty() && line.size() + 1 + word.size() > width) {
-            if (lines == maxLines) {
-                line += "...";
-                break;
-            }
-            out += line + "\n";
-            line.clear();
-            ++lines;
-        }
-        line += (line.empty() ? "" : " ") + word.substr(0, width);
-    }
-    return out + line;
-}
-
-std::string ColorCode(uint8_t color) {
-    return std::string{"\x1A\x06\xFF\x00\x00", 5} + static_cast<char>(color);
-}
-
-std::string ForeignGetText(int language) {
-    const ApLocation* location = s_rt.lastForeign;
-    const std::string white = ColorCode(0);
-    const std::string yellow = ColorCode(4);
-    uint8_t itemColor = 2;  // filler: green
-    if (location != nullptr) {
-        if (location->flags & kItemProgression) {
-            itemColor = 6;  // purple
-        } else if (location->flags & kItemUseful) {
-            itemColor = 3;  // light blue
-        } else if (location->flags & kItemTrap) {
-            itemColor = 1;  // red
+// The location whose item the get-item box being shown is about. Checks can be resolved early
+// (actors preview their item when they spawn) and several at once (the Master Sword pedestal
+// gives two), so: the item actor's give tag when it was seen, otherwise the earliest check
+// resolved in the most recent frame that had any, among those not given yet.
+const ApLocation* ForeignLocationShown() {
+    if (const auto* partner = static_cast<const fopAc_ac_c*>(dComIfGp_event_getItemPartner());
+        partner != nullptr && partner->mItemGiveTag != 0)
+    {
+        if (const auto it = s_rt.foreignByTag.find(partner->mItemGiveTag); it != s_rt.foreignByTag.end()) {
+            return it->second;
         }
     }
-    const std::string owner = location ? SanitizeForGameText(location->owner, 24) : std::string{};
-    const std::string item = location ? WrapLine(SanitizeForGameText(location->item, 64), 30, 2) : std::string{};
+    if (s_rt.foreignNotes.empty()) {
+        return nullptr;
+    }
+    const uint64_t latest = s_rt.foreignNotes.back().frame;
+    for (const auto& note : s_rt.foreignNotes) {
+        if (note.frame == latest) {
+            return note.location;
+        }
+    }
+    return nullptr;
+}
 
-    std::string text;
+std::string GameTextFromUtf8(const std::string& text, int language) {
+    try {
+        return language == MESSAGE_LANGUAGE_JAPANESE ? UTF8ToShiftJIS(text) : UTF8ToCP1252(text);
+    } catch (const std::exception&) {
+        return text;  // the templates are valid; player names were already made ASCII
+    }
+}
+
+// "You found Bob's Moon Pearl!", laid out like the randomizer's own get-item texts
+std::string ForeignGetText(const ApLocation* location, int language) {
     if (location == nullptr) {
         switch (language) {
         case MESSAGE_LANGUAGE_GERMAN:
-            return "Du hast einen Gegenstand f\xFCr eine\nandere Welt gefunden!";
+            return GameTextFromUtf8("<fast>Du hast einen Gegenstand f\u00fcr\neine andere Welt gefunden!", language);
         case MESSAGE_LANGUAGE_FRENCH:
-            return "Vous avez trouv\xE9 un objet\npour un autre monde !";
+            return GameTextFromUtf8("<fast>Vous avez trouv\u00e9 un objet\npour un autre monde !", language);
         case MESSAGE_LANGUAGE_SPANISH:
-            return "\xA1Has encontrado un objeto\npara otro mundo!";
+            return GameTextFromUtf8("<fast>\u00a1Has encontrado un objeto\npara otro mundo!", language);
         case MESSAGE_LANGUAGE_ITALIAN:
-            return "Hai trovato un oggetto\nper un altro mondo!";
+            return GameTextFromUtf8("<fast>Hai trovato un oggetto\nper un altro mondo!", language);
         case MESSAGE_LANGUAGE_JAPANESE:
-            return UTF8ToShiftJIS("別の世界のアイテムを\n見つけた！");
+            return GameTextFromUtf8("<fast>\u5225\u306e\u4e16\u754c\u306e\u30a2\u30a4\u30c6\u30e0\u3092\n\u898b\u3064\u3051\u305f\uff01", language);
         default:
-            return "You found an item for\nanother world!";
+            return "<fast>You found an item for\nanother world!";
         }
     }
-    const std::string coloredOwner = yellow + owner + white;
-    const std::string coloredItem = ColorCode(itemColor) + item + white;
+    const char* itemColor = "<green>";  // filler
+    if (location->flags & kItemProgression) {
+        itemColor = "<purple>";
+    } else if (location->flags & kItemUseful) {
+        itemColor = "<light blue>";
+    } else if (location->flags & kItemTrap) {
+        itemColor = "<red>";
+    }
+    const std::string owner = "<yellow>" + SanitizeForGameText(location->owner, 16) + "<white>";
+    const std::string item = std::string{itemColor} + SanitizeForGameText(location->item, 48) + "<white>";
+    std::string text;
     switch (language) {
     case MESSAGE_LANGUAGE_GERMAN:
-        return "Du hast etwas f\xFCr " + coloredOwner + " gefunden:\n" + coloredItem + "!";
+        text = "<fast>Du hast " + item + " f\u00fcr " + owner + " gefunden!";
+        break;
     case MESSAGE_LANGUAGE_FRENCH:
-        return "Vous avez trouv\xE9 pour " + coloredOwner + " :\n" + coloredItem + " !";
+        text = "<fast>Vous avez trouv\u00e9 " + item + " pour " + owner + " !";
+        break;
     case MESSAGE_LANGUAGE_SPANISH:
-        return "\xA1Has encontrado para " + coloredOwner + ":\n" + coloredItem + "!";
+        text = "<fast>\u00a1Has encontrado " + item + " para " + owner + "!";
+        break;
     case MESSAGE_LANGUAGE_ITALIAN:
-        return "Hai trovato per " + coloredOwner + ":\n" + coloredItem + "!";
+        text = "<fast>Hai trovato " + item + " per " + owner + "!";
+        break;
     case MESSAGE_LANGUAGE_JAPANESE:
-        return coloredOwner + UTF8ToShiftJIS("のアイテム：") + "\n" + coloredItem;
+        text = "<fast>" + owner + "\u306e" + item + "\u3092\u898b\u3064\u3051\u305f\uff01";
+        break;
     default:
-        return "You found " + coloredOwner + "'s\n" + coloredItem + "!";
+        text = "<fast>You found " + owner + "'s " + item + "!";
+        break;
     }
+    return GameTextFromUtf8(text, language);
+}
+
+// Final game text (control codes applied, lines broken with the game's font like the
+// randomizer's texts), cached per location and language
+const std::string& ForeignMessageText(const ApLocation* location, int language) {
+    static std::array<std::string, 7> s_generic;
+    const size_t slot = static_cast<size_t>(language) < 7 ? static_cast<size_t>(language) : 0;
+    std::string& cached = location != nullptr ? s_rt.foreignTexts[location][slot] : s_generic[slot];
+    if (cached.empty()) {
+        std::string text = ForeignGetText(location, language);
+        breakLines(text, 14.0f, language);  // Text::MAX_LINE_WIDTH_ITEM_TEXTBOX
+        applyMessageCodes(text);
+        cached = std::move(text);
+    }
+    return cached;
 }
 
 bool ForeignItemMessage(
@@ -486,7 +527,7 @@ bool ForeignItemMessage(
         return false;
     }
     thread_local std::vector<uint8_t> buffer;
-    const std::string text = ForeignGetText(message->language);
+    const std::string& text = ForeignMessageText(ForeignLocationShown(), message->language);
     buffer.assign(text.begin(), text.end());
     buffer.push_back(0);
     outText->text = buffer.data();
@@ -505,6 +546,24 @@ void RegisterMessageOverrides() {
                 static_cast<int>(handle.result()));
         }
         s_messageOverrides.push_back(std::move(handle));
+    }
+}
+
+// The get-item text of item 0xDC is message 321, which is overridden above. Dusklight only
+// overrides messages the game has; the unused items around 0xDC all have one (the randomizer
+// overrides 317-320 and 325-335), so 321 should too. Checked once in game, and if it is missing
+// the get-item box uses a registered message instead (ForeignFallbackMessageId).
+void CheckForeignMessage() {
+    auto* messages = dComIfGp_getMsgObjectClass();
+    if (messages == nullptr || dMeter2Info_getMsgResource() == nullptr) {
+        return;
+    }
+    s_rt.messageChecked = true;
+    const u32 index = messages->getMessageIndexAlways(kForeignItemMessage);
+    s_foreignMessageMissing = messages->getMessageIDAlways(index) != kForeignItemMessage;
+    if (s_foreignMessageMissing) {
+        mods::log::error("Archipelago: the game has no message {}; using a registered message for other "
+                         "players' items", kForeignItemMessage);
     }
 }
 
@@ -1094,6 +1153,7 @@ void OnGameReset() {
 }
 
 void Tick() {
+    ++s_frame;
     transport::Pump();
     if (s_client) {
         s_client->Tick(NowMs());
@@ -1103,6 +1163,9 @@ void Tick() {
         daAlink_getAlinkActorClass() == nullptr || dComIfGp_getStageStagInfo() == nullptr)
     {
         return;  // only while playing: flags are read from the loaded stage and save
+    }
+    if (!s_rt.messageChecked) {
+        CheckForeignMessage();
     }
     if (++s_rt.scanTimer >= kScanInterval) {
         s_rt.scanTimer = 0;
@@ -1123,13 +1186,51 @@ bool ResolveCheck(const ItemCheckInfo* info, ItemCheckResolution* outResult) {
     return true;
 }
 
-void NoteResolution(const char* checkName, uint8_t item) {
-    if (item != kArchipelagoItemId || !s_rt.active) {
+void NoteResolution(const ItemCheckInfo* info, uint8_t item) {
+    if (info == nullptr || item != kArchipelagoItemId || !s_rt.active) {
         return;
     }
-    if (const auto index = s_rt.index.ForCheck(checkName)) {
-        s_rt.lastForeign = s_rt.index.Locations()[*index].ap;
+    const auto index = s_rt.index.ForCheck(info->name);
+    if (!index) {
+        return;
     }
+    const ApLocation* location = s_rt.index.Locations()[*index].ap;
+    auto& notes = s_rt.foreignNotes;
+    std::erase_if(notes, [location](const auto& note) { return note.location == location; });
+    notes.push_back({location, s_frame});
+    while (notes.size() > 64) {
+        notes.pop_front();
+    }
+    // Item actors carry the give tag their get-item box will have
+    if (const auto* giver = static_cast<const fopAc_ac_c*>(info->giver_actor);
+        giver != nullptr && giver->mItemGiveTag != 0)
+    {
+        s_rt.foreignByTag[giver->mItemGiveTag] = location;
+    }
+}
+
+bool ForeignItemIsProgression() {
+    const ApLocation* location = s_rt.active ? ForeignLocationShown() : nullptr;
+    return location == nullptr || (location->flags & kItemProgression) != 0;
+}
+
+uint16_t ForeignFallbackMessageId() {
+    if (!s_foreignMessageMissing || !s_rt.active) {
+        return 0;
+    }
+    const ApLocation* location = ForeignLocationShown();
+    const auto style = mods::flow::MessageStyle{}.box_kind(MESSAGE_BOX_ITEM_GET);
+    std::vector<mods::flow::MessageVariant> variants;
+    for (const auto language : {MESSAGE_LANGUAGE_ENGLISH, MESSAGE_LANGUAGE_GERMAN, MESSAGE_LANGUAGE_FRENCH,
+             MESSAGE_LANGUAGE_SPANISH, MESSAGE_LANGUAGE_ITALIAN, MESSAGE_LANGUAGE_JAPANESE})
+    {
+        const std::string& text = ForeignMessageText(location, language);
+        std::vector<uint8_t> bytes{text.begin(), text.end()};
+        bytes.push_back(0);
+        variants.emplace_back(language, style.data(), std::move(bytes));
+    }
+    s_fallbackMessage = mods::flow::register_message(0, variants);
+    return s_fallbackMessage ? s_fallbackMessage.id() : 0;
 }
 
 void ObserveGive(const ItemGiveInfo* info) {
@@ -1162,6 +1263,8 @@ void ObserveGive(const ItemGiveInfo* info) {
     if (const auto location = s_rt.index.ForCheck(name)) {
         if (const auto* ap = s_rt.index.Locations()[*location].ap) {
             MarkChecked({ap->id});
+            // Given: its get-item box (if any) has been shown
+            std::erase_if(s_rt.foreignNotes, [ap](const auto& note) { return note.location == ap; });
         }
     }
 }
