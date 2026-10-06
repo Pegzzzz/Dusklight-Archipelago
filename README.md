@@ -82,5 +82,6 @@ tested by playing.
 
 - The [Dusklight Randomizer](https://github.com/TwilitRealm/dusklight-randomizer) and
   [Dusklight](https://github.com/TwilitRealm/dusklight) by Twilit Realm. This project is a fork of
-  the randomizer; everything it does in game rests on their work.
+  the randomizer; everything it does in game rests on their work. The "Twilight Princess
+  Archipelago" title logo comes from the randomizer's own `archipelago` branch.
 - [Archipelago](https://github.com/ArchipelagoMW/Archipelago).
