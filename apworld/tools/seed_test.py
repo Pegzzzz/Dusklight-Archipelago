@@ -6,7 +6,8 @@ games), takes each Dusklight slot's slot_data from the multidata, and runs the C
 which drives the randomizer generator exactly as the mod does and checks every placement.
 
 Usage (from an Archipelago checkout that has the world installed):
-    python <repo>/apworld/tools/seed_test.py --ap-tool <build>/ap_tool [--count 10] [--others "Timespinner"]
+    python <repo>/apworld/tools/seed_test.py --ap-tool <build>/ap_tool [--seeddata-test <build>/ap_seeddata_test]
+        [--count 10] [--others "Timespinner"]
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ import zlib
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ap-tool", required=True)
+    parser.add_argument("--seeddata-test", help="also run ap_seeddata_test (seed.dat round trip)")
     parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--others", default="")
@@ -101,6 +103,18 @@ def main() -> int:
                         print("   ", line)
                 else:
                     print(f"[{n}] slot {slot}: {result[-1] if result else proc.stdout[-200:]}")
+                if args.seeddata_test:
+                    proc = subprocess.run([args.seeddata_test, slot_file, os.path.join(tmp, f"data{slot}")],
+                                          capture_output=True, text=True, timeout=600)
+                    lines = [line for line in proc.stdout.splitlines()
+                             if line.split("\t", 1)[0] in ("OK", "FAIL", "ERROR", "MISMATCH")]
+                    if proc.returncode != 0:
+                        failures += 1
+                        print(f"[{n}] slot {slot} seed data FAILED (exit {proc.returncode}):")
+                        for line in (lines or proc.stderr.splitlines()[-10:])[:15]:
+                            print("   ", line)
+                    else:
+                        print(f"[{n}] slot {slot} seed data: {lines[-1]}")
     print(f"checked {checked} slots, {failures} failed")
     return 1 if failures else 0
 

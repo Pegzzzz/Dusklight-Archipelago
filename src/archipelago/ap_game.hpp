@@ -16,6 +16,7 @@
 
 #include <deque>
 #include <string>
+#include <vector>
 
 namespace randomizer::archi::game {
 
@@ -74,6 +75,8 @@ bool ToastsEnabled();
 void SetToastsEnabled(bool enabled);
 
 size_t LocationCount();
+/// Names of this world's Archipelago locations that are not checked yet.
+std::vector<std::string> RemainingLocations();
 size_t CheckedLocationCount();
 size_t ReceivedItemCount();
 

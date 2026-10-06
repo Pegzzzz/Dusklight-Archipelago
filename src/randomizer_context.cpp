@@ -472,8 +472,8 @@ std::optional<std::string> RandomizerContext::LoadFromHash(const std::string& ha
 
     UiToastDesc desc = UI_TOAST_DESC_INIT;
     desc.type = "success";
-    desc.title_rml = "Randomizer";
-    std::string body_text = fmt::format("Loaded Randomizer Seed {}", this->mHash);
+    desc.title_rml = "Archipelago";
+    std::string body_text = fmt::format("Loaded seed {}", this->mHash);
     desc.body_rml = body_text.c_str();
     desc.duration_ms = 3000;
     randomizer::session::svc_mng.ui->push_toast(randomizer::session::svc_mng.mod_ctx, &desc);

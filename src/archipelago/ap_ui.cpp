@@ -3,13 +3,17 @@
 #include "ap_game.hpp"
 
 #include "../session.hpp"
+#include "../ui/rando_seed_generation.hpp"
 
 #include "Z2AudioLib/Z2SeMgr.h"
 #include "m_Do/m_Do_audio.h"
 
 #include <fmt/format.h>
 
+#include <climits>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace randomizer::archi::ui {
 namespace {
@@ -96,8 +100,12 @@ std::string NewSaveStatusRml() {
     case NewSavePhase::Idle:
         return "Not connected.";
     case NewSavePhase::Connecting:
-    case NewSavePhase::Generating:
         return message;
+    case NewSavePhase::Generating: {
+        // The generator reports its steps the same way as for randomizer seeds
+        const std::string step = randomizer::ui::ReadGenerationStatusMsg();
+        return message + (step.empty() ? "" : "<br/>" + game::EscapeRml(step));
+    }
     case NewSavePhase::Ready:
         return "<span style=\"color: #7fff7f;\">" + message + "</span> Press Start to name your file.";
     case NewSavePhase::Error:
@@ -270,9 +278,62 @@ ModResult UpdateMessagesTab(ModContext*, void*, ModError*) {
     return MOD_OK;
 }
 
+struct LocationsTab {
+    UiListHandle list{};
+    UiElementHandle count{};
+    std::vector<std::string> names;
+    size_t shownChecked = SIZE_MAX;
+};
+LocationsTab s_locations;
+
+void RefreshLocations() {
+    s_locations.names = game::RemainingLocations();
+    std::vector<UiListItem> items;
+    items.reserve(s_locations.names.size());
+    for (size_t i = 0; i < s_locations.names.size(); ++i) {
+        UiListItem item = UI_LIST_ITEM_INIT;
+        item.key = i + 1;
+        item.label = s_locations.names[i].c_str();
+        items.push_back(item);
+    }
+    if (s_locations.list != 0) {
+        Ui()->list_set_items(mod_ctx, s_locations.list, items.data(), items.size());
+    }
+    if (s_locations.count != 0) {
+        const std::string text = fmt::format("{} location(s) left to check.", s_locations.names.size());
+        Ui()->elem_set_text(mod_ctx, s_locations.count, text.c_str());
+    }
+}
+
+ModResult BuildLocationsTab(ModContext*, UiWindowHandle, UiElementHandle left, UiElementHandle right, void*,
+    ModError*) {
+    s_locations = LocationsTab{};
+    if (!game::SaveActive()) {
+        AddText(left, "Load an Archipelago save to see its locations.");
+        return MOD_OK;
+    }
+    Ui()->pane_add_text(mod_ctx, left, "", &s_locations.count);
+    UiListDesc desc = UI_LIST_DESC_INIT;
+    desc.on_pressed = [](ModContext*, UiListHandle, uint64_t, void*) {};
+    Ui()->pane_add_list(mod_ctx, left, &desc, &s_locations.list);
+    s_locations.shownChecked = game::CheckedLocationCount();
+    RefreshLocations();
+    AddRml(right, "The locations of this world that have not been checked yet, from your save and from "
+                  "the room. Use <b>!hint</b> in the Messages tab to find where your items are.");
+    return MOD_OK;
+}
+
+ModResult UpdateLocationsTab(ModContext*, void*, ModError*) {
+    if (game::SaveActive() && game::CheckedLocationCount() != s_locations.shownChecked) {
+        s_locations.shownChecked = game::CheckedLocationCount();
+        RefreshLocations();
+    }
+    return MOD_OK;
+}
+
 void OpenGameWindow(ModContext* ctx, void*) {
     s_game = GameWindow{};
-    UiTabDesc tabs[2]{};
+    UiTabDesc tabs[3]{};
     tabs[0] = UI_TAB_DESC_INIT;
     tabs[0].title = "Connection";
     tabs[0].build = BuildConnectionTab;
@@ -281,11 +342,17 @@ void OpenGameWindow(ModContext* ctx, void*) {
     tabs[1].title = "Messages";
     tabs[1].build = BuildMessagesTab;
     tabs[1].update = UpdateMessagesTab;
+    tabs[2] = UI_TAB_DESC_INIT;
+    tabs[2].title = "Locations";
+    tabs[2].build = BuildLocationsTab;
+    tabs[2].update = UpdateLocationsTab;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;
-    desc.tab_count = 2;
+    desc.tab_count = 3;
     desc.on_closed = [](ModContext*, UiWindowHandle, void*) {
         s_game.status = s_game.stats = s_game.log = 0;
+        s_locations.list = 0;
+        s_locations.count = 0;
     };
     UiWindowHandle window{};
     Ui()->window_push(ctx, &desc, &window);

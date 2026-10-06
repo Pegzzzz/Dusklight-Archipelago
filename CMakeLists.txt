@@ -115,8 +115,10 @@ set(RANDOMIZER_SOURCES
         src/ui/rando_config.cpp
         src/ui/ui.cpp
         src/ui/tracker.cpp
+        src/check_names.cpp
         src/archipelago/ap_client.cpp
         src/archipelago/ap_game.cpp
+        src/archipelago/ap_locations.cpp
         src/archipelago/ap_seed.cpp
         src/archipelago/ap_transport.cpp
         src/archipelago/ap_ui.cpp
@@ -265,4 +267,37 @@ if (UNIX)
             ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ap_client.cpp
             ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ws_codec.cpp)
     target_link_libraries(ap_client_driver PRIVATE nlohmann_json::nlohmann_json)
+endif ()
+
+# Archipelago: the mod's new-save seed pipeline (slot data -> seed.dat -> in-game lookups) on the
+# host, against the game headers but without the game (Linux only: game symbols stay unresolved)
+if (UNIX AND NOT APPLE AND NOT ANDROID)
+    # Text line breaking measures with the game's font in the mod; use the generator's own widths
+    set(_ap_test_generator_sources ${RANDOMIZER_GENERATOR_SOURCES})
+    list(REMOVE_ITEM _ap_test_generator_sources generator/utility/text.cpp)
+    add_library(ap_test_text OBJECT EXCLUDE_FROM_ALL generator/utility/text.cpp)
+    target_link_libraries(ap_test_text PRIVATE dusklight_mod_api yaml-cpp::yaml-cpp fmt::fmt randomizer_embeds)
+    target_compile_definitions(ap_test_text PRIVATE RANDOMIZER_ONLY RANDO_DATA_PATH="generator/data/"
+            SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE})
+    add_executable(ap_seeddata_test EXCLUDE_FROM_ALL
+            ${CMAKE_CURRENT_SOURCE_DIR}/apworld/tools/parity/seeddata_test.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ap_seed.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ap_locations.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/check_names.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/randomizer_context.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/tools.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/stages.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/paths.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/rando_seed_generation.cpp
+            ${_ap_test_generator_sources}
+            $<TARGET_OBJECTS:ap_test_text>)
+    target_link_libraries(ap_seeddata_test PRIVATE dusklight_mod_api dusklight_game_abi_headers
+            yaml-cpp::yaml-cpp base64pp fmt::fmt randomizer_embeds nlohmann_json::nlohmann_json)
+    target_compile_options(ap_seeddata_test PRIVATE "SHELL:-include global.h")
+    target_compile_definitions(ap_seeddata_test PRIVATE
+            DUSK_MOD_FEATURE_FMT=1 DUSK_MOD_FEATURE_GAME=1
+            FULL_RANDOMIZER_VERSION="${FULL_RANDOMIZER_VERSION}"
+            RANDO_DATA_PATH="generator/data/"
+            SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE})
+    target_link_options(ap_seeddata_test PRIVATE "LINKER:--unresolved-symbols=ignore-all")
 endif ()

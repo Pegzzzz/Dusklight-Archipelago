@@ -1,5 +1,6 @@
 #include "ap_game.hpp"
 
+#include "ap_locations.hpp"
 #include "ap_seed.hpp"
 #include "ap_transport.hpp"
 #include "ap_ui.hpp"
@@ -76,6 +77,12 @@ std::filesystem::path SeedWorkDir(const std::string& seed) {
 
 std::filesystem::path SlotDataPath(const std::string& seed) {
     return SeedWorkDir(seed) / "slot_data.json";
+}
+
+// The game ends with the credits and no save after Ganondorf, so the goal is also remembered
+// here until the room has been told.
+std::filesystem::path GoalMarkerPath(const std::string& seed) {
+    return SeedWorkDir(seed) / "goal_complete";
 }
 
 bool WriteText(const std::filesystem::path& path, const std::string& text) {
@@ -167,29 +174,6 @@ const std::unordered_map<uint8_t, std::string>& ItemNames() {
     return names;
 }
 
-enum class FlagKind : uint8_t { None, Tbox, Switch, Item, Event };
-
-struct TrackedLocation {
-    const ApLocation* ap = nullptr;
-    FlagKind kind = FlagKind::None;
-    int stage = -1;
-    uint16_t flag = 0;
-};
-
-enum CheckKind : uint64_t {
-    kCheckChest = 1,
-    kCheckPoe,
-    kCheckFreestanding,
-    kCheckGoldenWolf,
-    kCheckShop,
-    kCheckSky,
-    kCheckBug,
-};
-
-uint64_t CheckKey(CheckKind kind, uint64_t key) {
-    return (static_cast<uint64_t>(kind) << 32) | (key & 0xFFFFFFFFu);
-}
-
 struct SaveState {
     ConnectionForm connection;
     std::string seed;        // slot seed ("AP...") the save was created for
@@ -203,9 +187,7 @@ struct Runtime {
     SaveState save;
     bool active = false;  // a save of this game mode is loaded
     std::optional<SlotData> slot;
-    std::vector<TrackedLocation> locations;
-    std::unordered_map<uint64_t, size_t> byCheckKey;
-    std::unordered_map<std::string, size_t> byCheckName;
+    LocationIndex index;
     std::set<int64_t> checked;
     size_t queuedItems = 0;      // server items handed to the give queue (index)
     std::set<size_t> doneItems;  // completed gives not yet contiguous with save.received
@@ -303,153 +285,7 @@ std::string MessageRml(const ApMessage& message) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Location index
-
-void BuildLocationIndex() {
-    s_rt.locations.clear();
-    s_rt.byCheckKey.clear();
-    s_rt.byCheckName.clear();
-    if (!s_rt.slot) {
-        return;
-    }
-
-    std::unordered_map<std::string, YAML::Node> metadata;
-    auto tree = LOAD_EMBED_YAML(RANDO_DATA_PATH "locations.yaml");
-    for (const auto& node : tree) {
-        metadata[node["Name"].as<std::string>()] = node["Metadata"];
-    }
-
-    for (const auto& ap : s_rt.slot->locations) {
-        TrackedLocation tracked;
-        tracked.ap = &ap;
-        const size_t index = s_rt.locations.size();
-        auto found = metadata.find(ap.name);
-        if (found == metadata.end() || !found->second.IsMap()) {
-            mods::log::warn("Archipelago: no metadata for location {}", ap.name);
-            s_rt.locations.push_back(tracked);
-            continue;
-        }
-        YAML::Node meta = found->second;
-        auto stageOf = [](const YAML::Node& node) { return getStageSaveId(node["Stage"].as<int>()); };
-
-        // Same precedence as the tracker (isLocationMetadataObtained)
-        if (auto chest = meta["Chest"]) {
-            tracked.kind = FlagKind::Tbox;
-            tracked.stage = stageOf(chest[0]);
-            tracked.flag = chest[0]["Tbox Id"].as<uint16_t>();
-        } else if (auto poe = meta["Poe"]) {
-            tracked.kind = FlagKind::Switch;
-            tracked.stage = stageOf(poe[0]);
-            tracked.flag = poe[0]["Flag"].as<uint16_t>();
-        } else if (auto item = meta["Freestanding Item"]) {
-            tracked.kind = ap.name == "Forest Temple Big Baba Key" ? FlagKind::Tbox : FlagKind::Item;
-            tracked.stage = stageOf(item[0]);
-            tracked.flag = item[0]["Flag"].as<uint16_t>();
-        } else if (auto event = meta["Event Flag"]) {
-            tracked.kind = FlagKind::Event;
-            tracked.flag = event.as<uint16_t>();
-        } else if (auto wolf = meta["Golden Wolf"]) {
-            tracked.kind = FlagKind::Event;
-            tracked.flag = wolf[0]["Flag"].as<uint16_t>();
-        } else if (auto sw = meta["Switch Flag"]) {
-            tracked.kind = FlagKind::Switch;
-            tracked.stage = stageOf(sw);
-            tracked.flag = sw["Flag"].as<uint16_t>();
-        } else if (auto itemFlag = meta["Item Flag"]) {
-            tracked.kind = FlagKind::Item;
-            tracked.stage = stageOf(itemFlag);
-            tracked.flag = itemFlag["Flag"].as<uint16_t>();
-        } else if (auto insect = meta["Twilit Insect"]) {
-            tracked.kind = FlagKind::Tbox;
-            tracked.stage = stageOf(insect[0]);
-            tracked.flag = insect[0]["Flag"].as<uint16_t>();
-        }
-        if (tracked.kind != FlagKind::Event && tracked.kind != FlagKind::None &&
-            (tracked.stage < 0 || tracked.stage == 0xFF))
-        {
-            tracked.kind = FlagKind::None;
-        }
-
-        // Item service check names that give this location's item
-        auto stageKey = [](const YAML::Node& node, const char* field) {
-            return (node["Stage"].as<uint64_t>() << 8) | (node[field].as<uint64_t>() & 0xFF);
-        };
-        if (auto chest = meta["Chest"]) {
-            s_rt.byCheckKey[CheckKey(kCheckChest, stageKey(chest[0], "Tbox Id"))] = index;
-        }
-        if (auto poe = meta["Poe"]) {
-            s_rt.byCheckKey[CheckKey(kCheckPoe, stageKey(poe[0], "Flag"))] = index;
-        }
-        if (auto item = meta["Freestanding Item"]) {
-            s_rt.byCheckKey[CheckKey(kCheckFreestanding, stageKey(item[0], "Flag"))] = index;
-        }
-        if (auto wolf = meta["Golden Wolf"]) {
-            s_rt.byCheckKey[CheckKey(kCheckGoldenWolf, wolf[0]["Flag"].as<uint64_t>())] = index;
-        }
-        if (auto shop = meta["Shop"]) {
-            const uint64_t key = (shop[0]["Stage"].as<uint64_t>() << 16) |
-                                 (shop[0]["Room"].as<uint64_t>() << 8) | (shop[0]["Item"].as<uint64_t>() & 0xFF);
-            s_rt.byCheckKey[CheckKey(kCheckShop, key)] = index;
-        }
-        if (auto sky = meta["Sky Character"]) {
-            s_rt.byCheckKey[CheckKey(kCheckSky, stageKey(sky[0], "Room"))] = index;
-        }
-        if (auto bug = meta["Bug Reward"]) {
-            s_rt.byCheckKey[CheckKey(kCheckBug, bug[0]["Item Id"].as<uint64_t>())] = index;
-        }
-        if (auto lookup = meta["Name Lookup"]) {
-            s_rt.byCheckName[nameLookupOverride(lookup[0].as<std::string>())] = index;
-        }
-        s_rt.byCheckName[ap.name] = index;
-        s_rt.locations.push_back(tracked);
-    }
-}
-
-std::optional<size_t> LocationForCheck(const char* name) {
-    if (name == nullptr) {
-        return std::nullopt;
-    }
-    auto byKey = [](CheckKind kind, uint64_t key) -> std::optional<size_t> {
-        const auto it = s_rt.byCheckKey.find(CheckKey(kind, key));
-        return it == s_rt.byCheckKey.end() ? std::nullopt : std::optional{it->second};
-    };
-    if (const auto it = s_rt.byCheckName.find(name); it != s_rt.byCheckName.end()) {
-        return it->second;
-    }
-    if (auto key = session::parse_derived(name, ITEM_CHECK_CHEST_PREFIX)) {
-        return byKey(kCheckChest, key->key);
-    }
-    if (auto key = session::parse_derived(name, ITEM_CHECK_FREESTANDING_PREFIX)) {
-        if (key->stage_id == Ook) {
-            if (const auto it = s_rt.byCheckName.find("Forest Temple Gale Boomerang");
-                it != s_rt.byCheckName.end())
-            {
-                return it->second;
-            }
-        }
-        return byKey(kCheckFreestanding, key->key);
-    }
-    if (auto flag = session::parse_flag_check(name, ITEM_CHECK_GOLDEN_WOLF_PREFIX)) {
-        return byKey(kCheckGoldenWolf, *flag);
-    }
-    if (auto key = session::parse_derived(name, ITEM_CHECK_POE_PREFIX)) {
-        return byKey(kCheckPoe, key->key);
-    }
-    if (auto stage = session::parse_stage_check(name, ITEM_CHECK_BOSS_PREFIX)) {
-        return byKey(kCheckFreestanding, (static_cast<uint64_t>(*stage) << 8) | 0x9F);
-    }
-    if (auto key = session::parse_shop_check(name, ITEM_CHECK_SHOP_PREFIX)) {
-        return byKey(kCheckShop, *key);
-    }
-    if (auto key = session::parse_derived(name, ITEM_CHECK_SKY_PREFIX)) {
-        return byKey(kCheckSky, key->key);
-    }
-    constexpr std::string_view bugPrefix{ITEM_CHECK_BUG_PREFIX};
-    if (std::strncmp(name, bugPrefix.data(), bugPrefix.size()) == 0) {
-        return byKey(kCheckBug, static_cast<uint64_t>(std::atoi(name + bugPrefix.size())) & 0xFF);
-    }
-    return std::nullopt;
-}
+// Location checks
 
 bool IsObtained(const TrackedLocation& location) {
     switch (location.kind) {
@@ -481,7 +317,7 @@ void MarkChecked(const std::vector<int64_t>& ids) {
 
 std::vector<int64_t> ScanFlags() {
     std::vector<int64_t> found;
-    for (const auto& location : s_rt.locations) {
+    for (const auto& location : s_rt.index.Locations()) {
         if (location.ap != nullptr && !s_rt.checked.contains(location.ap->id) && IsObtained(location)) {
             found.push_back(location.ap->id);
         }
@@ -914,6 +750,7 @@ void CheckGoalAndDeath() {
                 ganondorf != nullptr && ganondorf->mActionMode == 22 /* ACTION_END */)
             {
                 s_rt.save.goal = true;
+                WriteText(GoalMarkerPath(s_rt.save.seed), "1\n");
                 mods::log::info("Archipelago: Ganondorf defeated, goal complete");
                 AddLog("Goal complete!");
                 Toast("Archipelago", "Goal complete!", nullptr, 8000);
@@ -971,7 +808,7 @@ bool LoadSlot(const std::string& seed) {
         mods::log::error("Archipelago: bad slot data for seed {}: {}", seed, e.what());
         return false;
     }
-    BuildLocationIndex();
+    s_rt.index.Build(*s_rt.slot);
     return true;
 }
 
@@ -1076,7 +913,7 @@ ModResult OnNewSave() {
     s_rt.save.deathLink = s_newSlot->deathLink;
     s_rt.slot = std::move(s_newSlot);
     s_newSlot.reset();
-    BuildLocationIndex();
+    s_rt.index.Build(*s_rt.slot);
     WriteSaveBlob();
 
     // Keep the connection from the new-save screen, now retrying if it drops
@@ -1089,7 +926,7 @@ ModResult OnNewSave() {
     s_newPhase = NewSavePhase::Idle;
     s_pendingHash.clear();
     mods::log::info("Archipelago: new save for {} ({} locations)", s_rt.save.connection.slot,
-        s_rt.locations.size());
+        s_rt.index.Locations().size());
     return MOD_OK;
 }
 
@@ -1098,10 +935,15 @@ std::string PrepareSeed(const std::string& seedHash) {
     if (!state || state->seed.empty()) {
         return seedHash;
     }
-    RandomizerContext probe;
-    const auto error = probe.LoadFromHash(seedHash);
-    if (!error && !probe.mHash.empty()) {
-        return seedHash;  // seed files are fine
+    const auto seedFile = paths::GetRandomizerSeedsPath() / seedHash / "seed.dat";
+    try {
+        std::error_code ec;
+        if (std::filesystem::exists(seedFile, ec) &&
+            YAML::LoadFile(seedFile.string())["formatVersion"].as<u32>(0) == RandomizerContext::FORMAT_VERSION)
+        {
+            return seedHash;  // seed files are fine
+        }
+    } catch (const std::exception&) {
     }
     // Missing or obsolete (written by an older version of the mod): generate again
     const auto text = ReadText(SlotDataPath(state->seed));
@@ -1156,6 +998,10 @@ ModResult OnSaveLoaded() {
     }
     s_rt.save.seedHash = randomizer_GetContext().mHash;
     s_rt.goalSent = false;
+    std::error_code ec;
+    if (std::filesystem::exists(GoalMarkerPath(s_rt.save.seed), ec)) {
+        s_rt.save.goal = true;
+    }
     // Locations already done in this save are found by the first scan in game and sent then
     if (!s_rt.save.connection.server.empty() && !s_rt.save.connection.slot.empty()) {
         EnsureClient().Connect(MakeConfig(s_rt.save.connection, true, s_rt.save.deathLink), NowMs());
@@ -1209,8 +1055,8 @@ void NoteResolution(const char* checkName, uint8_t item) {
     if (item != kArchipelagoItemId || !s_rt.active) {
         return;
     }
-    if (const auto index = LocationForCheck(checkName)) {
-        s_rt.lastForeign = s_rt.locations[*index].ap;
+    if (const auto index = s_rt.index.ForCheck(checkName)) {
+        s_rt.lastForeign = s_rt.index.Locations()[*index].ap;
     }
 }
 
@@ -1241,8 +1087,8 @@ void ObserveGive(const ItemGiveInfo* info) {
         }
         return;
     }
-    if (const auto location = LocationForCheck(name)) {
-        if (const auto* ap = s_rt.locations[*location].ap) {
+    if (const auto location = s_rt.index.ForCheck(name)) {
+        if (const auto* ap = s_rt.index.Locations()[*location].ap) {
             MarkChecked({ap->id});
         }
     }
@@ -1327,7 +1173,7 @@ void SetToastsEnabled(bool enabled) {
 }
 
 size_t LocationCount() {
-    return s_rt.locations.size();
+    return s_rt.index.Locations().size();
 }
 
 size_t CheckedLocationCount() {
@@ -1337,6 +1183,21 @@ size_t CheckedLocationCount() {
         return all.size();
     }
     return s_rt.checked.size();
+}
+
+std::vector<std::string> RemainingLocations() {
+    std::vector<std::string> names;
+    for (const auto& location : s_rt.index.Locations()) {
+        if (location.ap == nullptr || s_rt.checked.contains(location.ap->id)) {
+            continue;
+        }
+        if (s_client && s_client->ServerCheckedLocations().contains(location.ap->id)) {
+            continue;
+        }
+        names.push_back(location.ap->name);
+    }
+    std::ranges::sort(names);
+    return names;
 }
 
 size_t ReceivedItemCount() {
