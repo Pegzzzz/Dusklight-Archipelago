@@ -588,6 +588,8 @@ void Listener::OnStateChanged(ApState state, const std::string& detail) {
     }
 }
 
+bool LoadSlot(const std::string& seed);
+
 void Listener::OnConnected(const json& slotData) {
     if (s_newPhase == NewSavePhase::Connecting) {
         std::string error;
@@ -653,6 +655,21 @@ void Listener::OnConnected(const json& slotData) {
         return;
     }
     s_verifiedSeed = seed;
+    if (!s_rt.slot) {
+        // The save was made on another device, or this seed's files were deleted: take the slot
+        // data from the room (the seed itself is rebuilt from it when the save is loaded)
+        if (WriteText(SlotDataPath(seed), slotData.dump()) && LoadSlot(seed)) {
+            mods::log::info("Archipelago: restored the slot data of seed {} from the room", seed);
+            if (randomizer_GetContext().mHash.empty()) {
+                const std::string message = "This save's seed was missing and has been restored from the room. "
+                                            "Return to the title screen and load the save again to play it.";
+                AddLog(EscapeRml(message));
+                Toast("Archipelago", EscapeRml(message), "warning", 15000);
+            } else {
+                AddLog("Restored this seed's Archipelago data from the room.");
+            }
+        }
+    }
     if (s_rt.save.goal) {
         s_client->SetGoalReached();
     }
@@ -1031,8 +1048,8 @@ ModResult OnSaveLoaded() {
     s_rt.active = true;
     s_capturedState.reset();
     if (!LoadSlot(s_rt.save.seed)) {
-        Toast("Archipelago", "The data for this save's seed is missing. Locations will not be sent.", "warning",
-            10000);
+        Toast("Archipelago", "This save's seed data is missing on this device. It will be restored from the "
+            "room once connected.", "warning", 10000);
     }
     s_rt.save.seedHash = randomizer_GetContext().mHash;
     s_rt.goalSent = false;
@@ -1194,6 +1211,9 @@ void ObserveGive(const ItemGiveInfo* info) {
             AddLog("Received " + s_rt.pendingReceived.back());
         }
         return;
+    }
+    if (!randomizer_IsActive()) {
+        return;  // this save's seed is not loaded: what the game gives is not the seed's item
     }
     if (const auto location = s_rt.index.ForCheck(name)) {
         if (const auto* ap = s_rt.index.Locations()[*location].ap) {
