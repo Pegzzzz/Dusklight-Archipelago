@@ -50,7 +50,18 @@ FetchContent_Declare(
         GIT_TAG        twilit-v2
 )
 
-FetchContent_MakeAvailable(yaml-cpp base64pp battery-embed)
+message(STATUS "randomizer: Fetching nlohmann_json")
+FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+        GIT_SHALLOW TRUE
+        ${_randomizer_exclude_from_all}
+)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+set(JSON_Install OFF CACHE INTERNAL "")
+
+FetchContent_MakeAvailable(yaml-cpp base64pp battery-embed nlohmann_json)
 
 set(RANDOMIZER_GENERATOR_SOURCES
         generator/logic/area.cpp
@@ -220,6 +231,19 @@ add_executable(ap_parity_harness EXCLUDE_FROM_ALL
 target_link_libraries(ap_parity_harness PRIVATE
         dusklight_mod_api yaml-cpp::yaml-cpp base64pp fmt::fmt randomizer_embeds)
 target_compile_definitions(ap_parity_harness PRIVATE
+        FULL_RANDOMIZER_VERSION="${FULL_RANDOMIZER_VERSION}"
+        RANDO_DATA_PATH="generator/data/"
+        SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE}
+        RANDOMIZER_ONLY)
+
+# Archipelago: stand-alone checks of slot data -> randomizer seed (no game needed)
+add_executable(ap_tool EXCLUDE_FROM_ALL
+        ${CMAKE_CURRENT_SOURCE_DIR}/apworld/tools/parity/ap_tool.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/archipelago/ap_seed.cpp
+        ${RANDOMIZER_GENERATOR_SOURCES})
+target_link_libraries(ap_tool PRIVATE
+        dusklight_mod_api yaml-cpp::yaml-cpp base64pp fmt::fmt randomizer_embeds nlohmann_json::nlohmann_json)
+target_compile_definitions(ap_tool PRIVATE
         FULL_RANDOMIZER_VERSION="${FULL_RANDOMIZER_VERSION}"
         RANDO_DATA_PATH="generator/data/"
         SOURCE_PATH_SIZE=${RANDOMIZER_SOURCE_PATH_SIZE}

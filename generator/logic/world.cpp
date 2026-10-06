@@ -664,6 +664,24 @@ namespace randomizer::logic::world
 
     void World::PlacePlandomizerItems()
     {
+        // Archipelago seeds: the multiworld decided every placement, including locations this
+        // world would otherwise fill with vanilla items. Its placements win, and the item pool is
+        // emptied because the rest of this world's items are in other players' games.
+        if (this->GetRandomizer()->GetConfig().IsArchipelago())
+        {
+            for (auto& [location, item] : this->_plandomizerLocations)
+            {
+                if (!location->IsEmpty() && location->GetCurrentItem() != item)
+                {
+                    LOG_TO_DEBUG("Archipelago placement replaces " + location->GetCurrentItem()->GetName() +
+                                 " at " + location->GetName());
+                }
+                location->SetCurrentItem(item);
+            }
+            this->_itemPool.clear();
+            return;
+        }
+
         for (auto& [location, item] : this->_plandomizerLocations)
         {
             if (!location->IsEmpty())

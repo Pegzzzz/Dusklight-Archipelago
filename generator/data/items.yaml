@@ -84,6 +84,10 @@
   Importance: Junk
   Id: 0x13
 
+- Name: Archipelago Item # Archipelago: an item that belongs to another player
+  Importance: Junk
+  Id: 0xDC
+
 - Name: Ordon Spring Portal # Custom Rando item
   Importance: Major
   Id: 0x14

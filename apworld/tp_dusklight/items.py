@@ -16,7 +16,7 @@ class TPDusklightItem(Item):
 ITEM_ID_BASE: int = load_ids()["item_id_base"]
 
 # Items that are only ever logic bookkeeping inside the randomizer (never shuffled)
-NON_POOL_ITEMS = {"Game Beatable", "Hint"}
+NON_POOL_ITEMS = {"Game Beatable", "Hint", "Archipelago Item"}
 
 item_data: dict[str, dict] = {raw["name"]: raw for raw in load_data()["items"]}
 item_name_to_id: dict[str, int] = {name: ITEM_ID_BASE + raw["id"] for name, raw in item_data.items()

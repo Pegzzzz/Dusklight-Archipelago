@@ -13,6 +13,7 @@
 #include "utility/time.hpp"
 #include "utility/progress.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 #ifndef RANDOMIZER_ONLY
@@ -169,10 +170,27 @@ namespace randomizer
             world->PerformPostFillTasks();
         }
 
+        const bool archipelago = this->_config.IsArchipelago();
+        if (archipelago)
+        {
+            // Archipelago's logic already decided which dungeons are required
+            const auto& required = this->_config.GetArchipelago().requiredDungeons;
+            for (auto& world : this->_worlds)
+            {
+                for (auto& [dungeonName, dungeon] : world->GetDungeonTable())
+                {
+                    dungeon->SetRequired(std::ranges::find(required, dungeonName) != required.end());
+                }
+            }
+        }
+
         UPDATE_PROGRESS_PERCENT(70.0);
         UPDATE_STATUS_MESSAGE("Generating Playthrough...")
-        // Generate Playthrough
-        logic::search::GeneratePlaythrough(this);
+        // Generate Playthrough (an Archipelago seed's playthrough spans the whole multiworld)
+        if (!archipelago)
+        {
+            logic::search::GeneratePlaythrough(this);
+        }
 
         UPDATE_PROGRESS_PERCENT(80.0);
         UPDATE_STATUS_MESSAGE("Generating Hints...")
@@ -182,7 +200,7 @@ namespace randomizer
         UPDATE_PROGRESS_PERCENT(90.0);
         UPDATE_STATUS_MESSAGE("Writing Data...")
         // Write Logs
-        if (this->_config.IsGeneratingSpoilerLog())
+        if (this->_config.IsGeneratingSpoilerLog() && !archipelago)
         {
             logic::spoiler_log::GenerateSpoilerLog(this);
         }

@@ -41,8 +41,20 @@ namespace randomizer
         std::filesystem::path GetBaseOutputPath() const { return this->_baseOutputPath; };
         void SetBaseOutputPath(const std::filesystem::path& path) { this->_baseOutputPath = path; };
 
-        std::filesystem::path GetConfigPath() const { return this->GetBaseOutputPath() / "settings.yaml"; }
-        std::filesystem::path GetPrefPath() const { return this->GetBaseOutputPath() / "preferences.yaml"; }
+        std::filesystem::path GetConfigPath() const {
+            return this->_configPath.empty() ? this->GetBaseOutputPath() / "settings.yaml" : this->_configPath;
+        }
+        std::filesystem::path GetPrefPath() const {
+            return this->_prefPath.empty() ? this->GetBaseOutputPath() / "preferences.yaml" : this->_prefPath;
+        }
+        /**
+         *  @brief Read settings/preferences from these files instead of the ones in the base output
+         *  path (used for Archipelago seeds, which carry their own settings).
+         */
+        void SetConfigPaths(const std::filesystem::path& settings, const std::filesystem::path& preferences) {
+            this->_configPath = settings;
+            this->_prefPath = preferences;
+        }
     private:
         seedgen::config::Config _config{};
         logic::world::WorldPool _worlds{};
@@ -56,5 +68,7 @@ namespace randomizer
         std::list<std::list<logic::entrance::Entrance*>> _entranceSpheres{};
 
         std::filesystem::path _baseOutputPath{};
+        std::filesystem::path _configPath{};
+        std::filesystem::path _prefPath{};
     };
 } // namespace randomizer

@@ -1074,11 +1074,18 @@ namespace randomizer::logic::hints {
                                       const std::list<std::string>& textNames,
                                       Text::Color color) {
         auto itemName = world->GetLocation(locationName)->GetCurrentItem()->GetName();
+        // Archipelago: name another player's item instead of "Archipelago Item"
+        const auto& apItemText = world->GetRandomizer()->GetConfig().GetArchipelago().itemText;
+        const auto apText = apItemText.find(locationName);
         for (const auto& textName : textNames) {
             auto textTemplate = textName + " Template";
             auto& text = world->AddNewText(textName);
             auto itemStandardName = addColor(getTextObjectForTemplate(itemName, Text::STANDARD, textTemplate), color);
             auto itemPrettyName = addColor(getTextObjectForTemplate(itemName, Text::PRETTY, textTemplate), color);
+            if (apText != apItemText.end()) {
+                itemStandardName = addColor(Text{"{" + apText->second + "}"}, color);
+                itemPrettyName = itemStandardName;
+            }
             text = getTextObject(textTemplate);
             text.Replace("<Item Standard Name>", itemStandardName);
             text.Replace("<Item Pretty Name>", itemPrettyName);
@@ -1233,6 +1240,15 @@ namespace randomizer::logic::hints {
     void GenerateAllHints(world::WorldPool& worlds) {
 
         GenerateAgithaSignHint(worlds);
+
+        // Archipelago seeds hold other players' items, so the randomizer's location, path and
+        // barren hints would be meaningless. Only generate the text the game needs.
+        if (!worlds.empty() && worlds.front()->GetRandomizer()->GetConfig().IsArchipelago()) {
+            GenerateRequiredDungeonsHint(worlds);
+            GenerateItemTextReplacements(worlds);
+            GenerateMidnaHintsText(worlds);
+            return;
+        }
 
         CalculatePossiblePathLocations(worlds);
         CalculatePossibleBarrenRegions(worlds);

@@ -5,6 +5,8 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 
 // forward declaration
@@ -15,6 +17,18 @@ namespace YAML
 
 namespace randomizer::seedgen::config
 {
+    /**
+     *  @brief Data for generating a seed whose placements come from an Archipelago multiworld.
+     *  Read from the "Archipelago" node of settings.yaml.
+     */
+    struct ArchipelagoData
+    {
+        bool enabled = false;
+        // Dungeons Archipelago's logic decided are required (sign at Link's House, Midna)
+        std::vector<std::string> requiredDungeons{};
+        // Location -> name shown in shop and NPC text for items that belong to other players
+        std::unordered_map<std::string, std::string> itemText{};
+    };
 
     class Config
     {
@@ -29,6 +43,8 @@ namespace randomizer::seedgen::config
         auto& GetSettings() { return this->_settingsList.front();}
         bool IsUsingPlandomizer() const { return this->_isUsingPlandomizer; }
         bool IsGeneratingSpoilerLog() const { return this->_isGeneratingSpoilerLog; }
+        const ArchipelagoData& GetArchipelago() const { return this->_archipelago; }
+        bool IsArchipelago() const { return this->_archipelago.enabled; }
         void ResetSettingsToDefault();
         void ResetPreferencesToDefault();
 
@@ -64,6 +80,7 @@ namespace randomizer::seedgen::config
         std::list<settings::Settings> _settingsList;
         bool _isUsingPlandomizer = false;
         bool _isGeneratingSpoilerLog = true;
+        ArchipelagoData _archipelago{};
     };
 
     int SeedRNG(Config& config, bool resolveNonStandardRandom = false, bool ignoreInvalidPlandomizer = true);

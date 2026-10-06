@@ -22,6 +22,7 @@ constexpr std::string_view STARTING_INVENTORY = "Starting Inventory";
 constexpr std::string_view EXCLUDED_LOCATIONS = "Excluded Locations";
 constexpr std::string_view MIXED_ENTRANCE_POOLS = "Mixed Entrance Pools";
 constexpr std::string_view GENERATE_SPOILER_LOG = "Generate Spoiler Log";
+constexpr std::string_view ARCHIPELAGO = "Archipelago";
 
 namespace randomizer::seedgen::config
 {
@@ -179,6 +180,28 @@ namespace randomizer::seedgen::config
             {
                 const auto& plandomizer = settingNode.second.as<bool>(false);
                 this->_isUsingPlandomizer = plandomizer;
+            }
+            // Archipelago seeds: placements come from the multiworld through the plandomizer
+            else if (settingName == ARCHIPELAGO)
+            {
+                const auto& apNode = settingNode.second;
+                this->_archipelago = {};
+                this->_archipelago.enabled = apNode["Enabled"].as<bool>(false);
+                if (apNode["Required Dungeons"])
+                {
+                    for (const auto& dungeonNode : apNode["Required Dungeons"])
+                    {
+                        this->_archipelago.requiredDungeons.push_back(dungeonNode.as<std::string>());
+                    }
+                }
+                if (apNode["Item Text"])
+                {
+                    for (const auto& textNode : apNode["Item Text"])
+                    {
+                        this->_archipelago.itemText[textNode.first.as<std::string>()] =
+                            textNode.second.as<std::string>();
+                    }
+                }
             }
         }
 
