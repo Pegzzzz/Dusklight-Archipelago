@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.25)
 project(randomizer CXX)
 set(CMAKE_CXX_STANDARD 23)
 
+# Sources and string literals are UTF-8 (the Archipelago get-item texts use \u escapes that must
+# come out as UTF-8 bytes); MSVC otherwise uses the system code page
+if (MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
+endif ()
+
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     # Fetch dusklight if we are invoking this as the root CMakeLists.txt
     if (NOT DUSKLIGHT_VERSION)

@@ -67,6 +67,17 @@ struct SlotData {
 std::string ForeignItemText(const ApLocation& location);
 std::string SanitizeForGameText(const std::string& text, size_t maxLength = 60);
 
+/// A player or item name for a get-item text, still UTF-8, at most maxChars characters: every
+/// character the text's encoding has is kept (accents in CP1252, kana and kanji in Shift-JIS when
+/// japanese), any other becomes '?', and characters the text system gives a meaning to (control
+/// codes, tags) are dropped, so converting the text with UTF8ToCP1252/UTF8ToShiftJIS can't fail.
+std::string NameForGameText(const std::string& utf8, size_t maxChars, bool japanese);
+
+/// The get-item text for another player's item ("You found Bob's Moon Pearl!", or a generic text
+/// when location is null) in a message language (MessageLanguage): encoded for the game, lines
+/// broken for the item text box, control codes applied.
+std::string ForeignGetItemText(const ApLocation* location, int language);
+
 /// Writes settings.yaml, preferences.yaml and plando.yaml for the slot into dir.
 void WriteGenerationFiles(const std::filesystem::path& dir, const SlotData& slot);
 

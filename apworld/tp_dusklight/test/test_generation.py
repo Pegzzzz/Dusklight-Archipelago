@@ -1,6 +1,8 @@
 """Generation tests across the option space. Each class runs Archipelago's standard checks
 (full-state reachability, an empty-state start, a complete fill) with its options."""
 
+from BaseClasses import LocationProgressType
+
 from . import TPDusklightTestBase
 
 
@@ -136,3 +138,47 @@ class TestDeathLink(TPDusklightTestBase):
 
     def test_slot_data_death_link(self) -> None:
         self.assertTrue(self.multiworld.worlds[self.player].fill_slot_data()["death_link"])
+
+
+class TestPriorityInBarrenDungeons(TPDusklightTestBase):
+    """Priority locations in every dungeon: those in dungeons that end up barren can't take
+    progression, so they stop being priority instead of failing the fill."""
+    options = {
+        "unrequired_dungeons_are_barren": True,
+        "priority_locations": [
+            "Forest Temple Entrance Vines Chest", "Goron Mines Entrance Chest", "Lakebed Temple Lobby Left Chest",
+            "Arbiters Grounds Torch Room East Chest", "Snowpeak Ruins Lobby West Armor Chest",
+            "Temple of Time First Staircase Window Chest", "City in the Sky Underwater West Chest",
+            "Palace of Twilight West Wing Chest Behind Wall of Darkness",
+        ],
+    }
+
+    def world_setup(self, seed=None) -> None:
+        # WorldTestBase skips the step of Main.main that marks priority locations (after set_rules)
+        import test.bases as bases
+        original = bases.call_all
+
+        def call_all(multiworld, step, *args):
+            original(multiworld, step, *args)
+            if step == "set_rules":
+                for name in multiworld.worlds[self.player].options.priority_locations.value:
+                    multiworld.get_location(name, self.player).progress_type = LocationProgressType.PRIORITY
+
+        bases.call_all = call_all
+        try:
+            super().world_setup(seed)
+        finally:
+            bases.call_all = original
+
+    def test_barren_priority_dropped(self) -> None:
+        world = self.multiworld.worlds[self.player]
+        self.assertTrue(world.barren_dungeons, "expected at least one barren dungeon")
+        barren = {name for dungeon in world.barren_dungeons for name in world.barren_locations[dungeon]}
+        self.assertTrue(barren & set(self.options["priority_locations"]))
+        for name in self.options["priority_locations"]:
+            location = self.multiworld.get_location(name, self.player)
+            if name in barren:
+                self.assertNotEqual(location.progress_type, LocationProgressType.PRIORITY, name)
+                self.assertNotIn(name, world.options.priority_locations.value)
+            else:
+                self.assertEqual(location.progress_type, LocationProgressType.PRIORITY, name)

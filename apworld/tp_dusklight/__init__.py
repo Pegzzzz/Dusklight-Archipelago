@@ -423,6 +423,12 @@ class TPDusklightWorld(World):
             if location is not None:
                 self._add_item_rule(location, lambda item, keys=frozenset(keys): not item.advancement or
                                     (item.player == self.player and item.name in keys))
+                # A priority location must take progression, which a barren dungeon can't hold
+                if location.progress_type == LocationProgressType.PRIORITY:
+                    location.progress_type = LocationProgressType.DEFAULT
+                    self.options.priority_locations.value.discard(name)
+                    logger.warning(f"{self.player_name}: \"{name}\" can't be a priority location because it is "
+                                   f"in or behind an unrequired (barren) dungeon.")
 
         small_mode = self.options.small_keys.current_key
         big_mode = self.options.big_keys.current_key

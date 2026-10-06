@@ -13,6 +13,7 @@
 #include "../tools.h"
 #include "../verify_item_functions.h"
 #include "../../generator/randomizer.hpp"
+#include "../../generator/utility/text.hpp"
 
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_b_gnd.h"
@@ -49,13 +50,10 @@
 #define ARCHIPELAGO_MOD_VERSION "unknown"
 #endif
 
-namespace randomizer {
-// generator/utility/text.cpp
-std::string UTF8ToShiftJIS(const std::string& utf8Str);
-std::string UTF8ToCP1252(const std::string& utf8Str);
-void breakLines(std::string& str, float maxStrLength, int lang);
-void applyMessageCodes(std::string& str);
-}
+// ForeignGetItemText takes the game's message language as the generator's text language
+static_assert(MESSAGE_LANGUAGE_ENGLISH == randomizer::Text::ENGLISH && MESSAGE_LANGUAGE_GERMAN == randomizer::Text::GERMAN &&
+              MESSAGE_LANGUAGE_FRENCH == randomizer::Text::FRENCH && MESSAGE_LANGUAGE_SPANISH == randomizer::Text::SPANISH &&
+              MESSAGE_LANGUAGE_ITALIAN == randomizer::Text::ITALIAN && MESSAGE_LANGUAGE_JAPANESE == randomizer::Text::JAPANESE);
 
 namespace randomizer::archi::game {
 namespace {
@@ -446,66 +444,6 @@ const ApLocation* ForeignLocationShown() {
     return nullptr;
 }
 
-std::string GameTextFromUtf8(const std::string& text, int language) {
-    try {
-        return language == MESSAGE_LANGUAGE_JAPANESE ? UTF8ToShiftJIS(text) : UTF8ToCP1252(text);
-    } catch (const std::exception&) {
-        return text;  // the templates are valid; player names were already made ASCII
-    }
-}
-
-// "You found Bob's Moon Pearl!", laid out like the randomizer's own get-item texts
-std::string ForeignGetText(const ApLocation* location, int language) {
-    if (location == nullptr) {
-        switch (language) {
-        case MESSAGE_LANGUAGE_GERMAN:
-            return GameTextFromUtf8("<fast>Du hast einen Gegenstand f\u00fcr\neine andere Welt gefunden!", language);
-        case MESSAGE_LANGUAGE_FRENCH:
-            return GameTextFromUtf8("<fast>Vous avez trouv\u00e9 un objet\npour un autre monde !", language);
-        case MESSAGE_LANGUAGE_SPANISH:
-            return GameTextFromUtf8("<fast>\u00a1Has encontrado un objeto\npara otro mundo!", language);
-        case MESSAGE_LANGUAGE_ITALIAN:
-            return GameTextFromUtf8("<fast>Hai trovato un oggetto\nper un altro mondo!", language);
-        case MESSAGE_LANGUAGE_JAPANESE:
-            return GameTextFromUtf8("<fast>\u5225\u306e\u4e16\u754c\u306e\u30a2\u30a4\u30c6\u30e0\u3092\n\u898b\u3064\u3051\u305f\uff01", language);
-        default:
-            return "<fast>You found an item for\nanother world!";
-        }
-    }
-    const char* itemColor = "<green>";  // filler
-    if (location->flags & kItemProgression) {
-        itemColor = "<purple>";
-    } else if (location->flags & kItemUseful) {
-        itemColor = "<light blue>";
-    } else if (location->flags & kItemTrap) {
-        itemColor = "<red>";
-    }
-    const std::string owner = "<yellow>" + SanitizeForGameText(location->owner, 16) + "<white>";
-    const std::string item = std::string{itemColor} + SanitizeForGameText(location->item, 48) + "<white>";
-    std::string text;
-    switch (language) {
-    case MESSAGE_LANGUAGE_GERMAN:
-        text = "<fast>Du hast " + item + " f\u00fcr " + owner + " gefunden!";
-        break;
-    case MESSAGE_LANGUAGE_FRENCH:
-        text = "<fast>Vous avez trouv\u00e9 " + item + " pour " + owner + " !";
-        break;
-    case MESSAGE_LANGUAGE_SPANISH:
-        text = "<fast>\u00a1Has encontrado " + item + " para " + owner + "!";
-        break;
-    case MESSAGE_LANGUAGE_ITALIAN:
-        text = "<fast>Hai trovato " + item + " per " + owner + "!";
-        break;
-    case MESSAGE_LANGUAGE_JAPANESE:
-        text = "<fast>" + owner + "\u306e" + item + "\u3092\u898b\u3064\u3051\u305f\uff01";
-        break;
-    default:
-        text = "<fast>You found " + owner + "'s " + item + "!";
-        break;
-    }
-    return GameTextFromUtf8(text, language);
-}
-
 // Final game text (control codes applied, lines broken with the game's font like the
 // randomizer's texts), cached per location and language
 const std::string& ForeignMessageText(const ApLocation* location, int language) {
@@ -513,10 +451,7 @@ const std::string& ForeignMessageText(const ApLocation* location, int language) 
     const size_t slot = static_cast<size_t>(language) < 7 ? static_cast<size_t>(language) : 0;
     std::string& cached = location != nullptr ? s_rt.foreignTexts[location][slot] : s_generic[slot];
     if (cached.empty()) {
-        std::string text = ForeignGetText(location, language);
-        breakLines(text, 14.0f, language);  // Text::MAX_LINE_WIDTH_ITEM_TEXTBOX
-        applyMessageCodes(text);
-        cached = std::move(text);
+        cached = ForeignGetItemText(location, language);
     }
     return cached;
 }

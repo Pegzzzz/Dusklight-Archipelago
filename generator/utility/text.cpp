@@ -702,6 +702,10 @@ const auto kSilverMessageCode = text_color_code(0xBFBFBFFF);
         float curLineWidth = 0.f;
         size_t i = 0;
         size_t lastBreakOpportunity = 0;
+        // Inserting a newline at the start of the current line would only add an empty line and
+        // measure the same text again, forever (a Japanese text, or a text after a newline, whose
+        // next run without a break opportunity is wider than a line)
+        size_t lineStart = 0;
 
         // Check if a byte is a Shift-JIS lead byte
         auto isSJISLeadByte = [&](uint8_t c) {
@@ -756,6 +760,7 @@ const auto kSilverMessageCode = text_color_code(0xBFBFBFFF);
                 curLineWidth = 0.f;
                 ++i;
                 lastBreakOpportunity = i;
+                lineStart = i;
                 continue;
             }
 
@@ -790,7 +795,8 @@ const auto kSilverMessageCode = text_color_code(0xBFBFBFFF);
             // If we exceed the maximum line width, replace the
             // previous space with a newline and start counting
             // from the newline again
-            if (curLineWidth > maxStrLength && lastBreakOpportunity > 0) {
+            if (curLineWidth > maxStrLength && lastBreakOpportunity > 0 &&
+                (lastBreakOpportunity > lineStart || str[lastBreakOpportunity] == ' ')) {
                 if (str[lastBreakOpportunity] == ' ') {
                     str[lastBreakOpportunity] = '\n';
                     i = lastBreakOpportunity + 1;
@@ -801,6 +807,7 @@ const auto kSilverMessageCode = text_color_code(0xBFBFBFFF);
                 }
                 curLineWidth = 0.f;
                 lastBreakOpportunity = 0;
+                lineStart = i;
                 continue;
             }
 

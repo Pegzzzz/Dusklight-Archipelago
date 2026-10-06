@@ -19,6 +19,7 @@
 #include "mods/svc/ui.h"
 
 #include "../../../generator/randomizer.hpp"
+#include "../../../generator/utility/text.hpp"
 #include "../../../src/archipelago/ap_locations.hpp"
 #include "../../../src/archipelago/ap_seed.hpp"
 #include "../../../src/randomizer_context.hpp"
@@ -27,6 +28,7 @@
 #include "../../../src/tools.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <fstream>
 #include <iostream>
@@ -188,8 +190,93 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Get-item texts for other players' items, built as the game builds them, in every language:
+    // nothing may fall back to the error text or leave a tag unapplied
+    int texts = 0;
+    int dumpTexts = std::getenv("SEEDDATA_DUMP_TEXTS") ? std::atoi(std::getenv("SEEDDATA_DUMP_TEXTS")) : 0;
+    auto checkText = [&](const randomizer::archi::ApLocation* ap) {
+        for (const int language : {0, 1, 2, 3, 4, 6}) {
+            ++texts;
+            const std::string text = randomizer::archi::ForeignGetItemText(ap, language);
+            if (dumpTexts > 0) {  // SEEDDATA_DUMP_TEXTS=n: show the first n texts
+                --dumpTexts;
+                std::cout << "TEXT\t" << language << "\t" << nlohmann::json(text).dump(-1, ' ', true,
+                             nlohmann::json::error_handler_t::replace) << std::endl;
+            }
+            if (text.empty() || text.find("You found an item!") != std::string::npos ||
+                text.find('<') != std::string::npos || text.find('>') != std::string::npos)
+            {
+                if (++mismatches <= 30) {
+                    std::cout << "MISMATCH\tget-item text for " << (ap ? ap->name : std::string("(none)"))
+                              << " in language " << language << ": " << nlohmann::json(text).dump(-1, ' ', true,
+                                 nlohmann::json::error_handler_t::replace) << std::endl;
+                }
+            }
+        }
+    };
+    checkText(nullptr);
+    for (const auto& ap : slot->locations) {
+        if (!ap.own) {
+            checkText(&ap);
+        }
+    }
+    // Line breaking ends on runs wider than a line (used to loop forever: Japanese text, or any
+    // text after a newline)
+    for (const auto& [input, language] : std::vector<std::pair<std::string, int>>{
+             {"Hello\nABCDEFGHIJKLMNOPQRSTUVWXYZ end", randomizer::Text::ENGLISH},
+             {"\x82\xa0" "ABCDEFGHIJKLMNOPQRSTUVWXYZ\x82\xa0\x82\xa0", randomizer::Text::JAPANESE},
+             {"\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0\x82\xa0", randomizer::Text::JAPANESE},
+         })
+    {
+        std::string text = input;
+        randomizer::breakLines(text, randomizer::Text::MAX_LINE_WIDTH_ITEM_TEXTBOX, language);
+        ++texts;
+        if (text.size() > input.size() + 4 && ++mismatches <= 40) {
+            std::cout << "MISMATCH\tline breaking added " << text.size() - input.size() << " bytes" << std::endl;
+        }
+    }
+    // Names: what each encoding can show is kept, the rest becomes '?', markup is dropped
+    const struct {
+        const char* in;
+        size_t max;
+        bool japanese;
+        const char* out;
+    } nameCases[] = {
+        {"Bob", 16, false, "Bob"},
+        {"\xC3\x89lise", 16, false, "\xC3\x89lise"},                     // Élise
+        {"\xC3\x89lise", 16, true, "?lise"},
+        {"Zo\xC3\xAB \xF0\x9F\x8E\xAE", 16, false, "Zo\xC3\xAB ?"},       // Zoë 🎮
+        {"\xE5\x90\x8D\xE5\x89\x8D", 16, true, "\xE5\x90\x8D\xE5\x89\x8D"},  // 名前
+        {"\xE5\x90\x8D\xE5\x89\x8D", 16, false, "??"},
+        {"\xC5\x9C" "a", 16, false, "?a"},                               // Ŝ (not CP1252)
+        {"\xE2\x82\xAC" "5 \xE2\x84\xA2", 16, false, "\xE2\x82\xAC" "5 \xE2\x84\xA2"},  // €5 ™
+        {"<red>Hack{x}", 16, false, "red Hack x"},
+        {"a\x01\x1A" "b\n\tc", 16, false, "a b c"},
+        {"\xFF\xFE" "ok", 16, false, "??ok"},                           // invalid UTF-8
+        {"\xC2\x85" "x", 16, false, "?x"},                              // C1 control
+        {"\xC0\xAF" "x", 16, false, "?x"},                              // overlong '/'
+        {"\xE2\x82", 16, false, "??"},                                  // truncated sequence
+        {"   ", 16, false, "?"},
+        {"", 16, false, "?"},
+        {"ABCDEFGHIJKLMNOPQRSTUVWXYZ", 16, false, "ABCDEFGHIJKLM..."},
+        {"\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9", 4, false, "\xC3\xA9..."},
+        {"Long name with spaces at the cut", 13, false, "Long name..."},
+    };
+    for (const auto& c : nameCases) {
+        const auto got = randomizer::archi::NameForGameText(c.in, c.max, c.japanese);
+        if (got != c.out && ++mismatches <= 40) {
+            std::cout << "MISMATCH\tname " << nlohmann::json(std::string(c.in)).dump(-1, ' ', true,
+                         nlohmann::json::error_handler_t::replace) << " -> "
+                      << nlohmann::json(got).dump(-1, ' ', true, nlohmann::json::error_handler_t::replace)
+                      << ", expected " << nlohmann::json(std::string(c.out)).dump(-1, ' ', true,
+                         nlohmann::json::error_handler_t::replace) << std::endl;
+        }
+        randomizer::archi::ApLocation fake{"(name test)", 0, c.in, c.in, randomizer::archi::kItemProgression, false};
+        checkText(&fake);
+    }
+
     std::cout << (mismatches == 0 ? "OK" : "FAIL") << "\t" << names << " check names, " << slot->locations.size() << " locations ("
               << foreign << " for other players), hash " << written.mHash << ", " << loaded.mTextOverrides.size()
-              << " text languages, " << loaded.mItemLocations.size() << " named checks" << std::endl;
+              << " text languages, " << loaded.mItemLocations.size() << " named checks, " << texts << " get-item texts" << std::endl;
     return mismatches == 0 ? 0 : 1;
 }
